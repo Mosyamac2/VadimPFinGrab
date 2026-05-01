@@ -56,6 +56,20 @@ class RunsRepo:
                 ),
             )
 
+    def set_drive_link(
+        self, run_id: int, file_id: str, web_view_link: str
+    ) -> None:
+        with self.db.transaction(self.conn):
+            self.conn.execute(
+                """
+                UPDATE runs
+                   SET excel_drive_file_id = ?,
+                       excel_drive_link = ?
+                 WHERE run_id = ?
+                """,
+                (file_id, web_view_link, run_id),
+            )
+
     def get_by_id(self, run_id: int) -> RunRow | None:
         cursor = self.conn.execute(
             "SELECT * FROM runs WHERE run_id = ?",
@@ -83,4 +97,6 @@ def _row_to_run(row: sqlite3.Row) -> RunRow:
         mode=row["mode"],
         stats_json=row["stats_json"],
         error_summary=row["error_summary"],
+        excel_drive_file_id=row["excel_drive_file_id"],
+        excel_drive_link=row["excel_drive_link"],
     )

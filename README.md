@@ -23,7 +23,8 @@ implementation is decomposed into 15 sequential prompts in
 - ✅ Prompt 10 — Event Extractor (LLM)
 - ✅ Prompt 11 — Validator (sanity checks + qa_issues)
 - ✅ Prompt 12 — Writer (SQLite mart + Excel)
-- ⬜ Prompts 13–15 — pending
+- ✅ Prompt 13 — Google Drive replication
+- ⬜ Prompts 14–15 — pending
 
 ## System packages
 

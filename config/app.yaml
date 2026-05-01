@@ -66,6 +66,18 @@ validator:
   # and routed into the QA-issues report (see ТЗ §11.2).
   completeness_threshold: 0.5
 
+google_drive:
+  # When true and the OAuth keys in .env are present, the Replicator stage
+  # uploads `output/e-disclosure.xlsx` to Google Drive after each successful
+  # run. The file_id is preserved (update, not create) so the public link
+  # never changes — see ТЗ §10.4.
+  enabled: false
+  # Drive folder ID where the mart should live (set to a folder you control).
+  folder_id: null
+  file_name: e-disclosure.xlsx
+  # Optional dated snapshots in `archive/` subfolder for audit.
+  archive: false
+
 # Optional contact email — embedded into the User-Agent header used for
 # scraping e-disclosure.ru. Leave empty if you do not want to expose it.
 contact_email: null

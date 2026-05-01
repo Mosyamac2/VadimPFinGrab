@@ -86,6 +86,24 @@ class ClassifierConfig(BaseModel):
     first_pages_to_inspect: int = Field(default=3, ge=1, le=20)
 
 
+class GoogleDriveConfig(BaseModel):
+    """Excel mart replication target on Google Drive (ТЗ §10.4).
+
+    When ``enabled=true`` and the OAuth credentials are present in ``.env``
+    (``GOOGLE_OAUTH_CLIENT_ID`` / ``GOOGLE_OAUTH_CLIENT_SECRET`` /
+    ``GOOGLE_OAUTH_REFRESH_TOKEN``), the Writer's Replicator stage uploads
+    the Excel mart to ``folder_id`` under the same ``file_name`` so the
+    public link does not change between runs.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    folder_id: str | None = None
+    file_name: str = "e-disclosure.xlsx"
+    archive: bool = False
+
+
 class ValidatorConfig(BaseModel):
     """Validator stage thresholds (ТЗ §11)."""
 
@@ -124,4 +142,5 @@ class AppConfig(BaseModel):
     classifier: ClassifierConfig = Field(default_factory=ClassifierConfig)
     text_extractor: TextExtractorConfig = Field(default_factory=TextExtractorConfig)
     validator: ValidatorConfig = Field(default_factory=ValidatorConfig)
+    google_drive: GoogleDriveConfig = Field(default_factory=GoogleDriveConfig)
     contact_email: str | None = None

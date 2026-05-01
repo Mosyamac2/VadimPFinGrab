@@ -157,6 +157,8 @@ class RunRow:
     mode: RunMode
     stats_json: str | None
     error_summary: str | None
+    excel_drive_file_id: str | None = None
+    excel_drive_link: str | None = None
 
 
 @dataclass(frozen=True)

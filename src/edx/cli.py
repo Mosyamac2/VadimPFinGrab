@@ -33,7 +33,7 @@ from edx.stages.metric_extractor import build_metric_extractor_service
 from edx.stages.text_extractor import build_text_extractor_service
 from edx.stages.unpacker import build_unpacker_service
 from edx.stages.validator import build_validator_service
-from edx.stages.writer import build_writer_service
+from edx.stages.writer import build_replicator_service, build_writer_service
 from edx.storage import (
     Database,
     DocumentsRepo,
@@ -203,6 +203,25 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Generate the Excel mart from state.sqlite (full snapshot).",
     )
     export_p.set_defaults(func=_cmd_export_excel)
+
+    replicate_p = subparsers.add_parser(
+        "replicate",
+        help="Upload the local Excel mart to Google Drive (config.google_drive).",
+    )
+    replicate_p.set_defaults(func=_cmd_replicate)
+
+    auth_p = subparsers.add_parser(
+        "auth",
+        help="Interactive authentication helpers.",
+    )
+    auth_sub = auth_p.add_subparsers(
+        dest="auth_command", required=True, metavar="subcommand"
+    )
+    auth_drive_p = auth_sub.add_parser(
+        "google-drive",
+        help="Run the OAuth flow once and print the refresh token.",
+    )
+    auth_drive_p.set_defaults(func=_cmd_auth_google_drive)
 
     cache_p = subparsers.add_parser(
         "cache",
@@ -696,6 +715,97 @@ def _cmd_export_excel(args: argparse.Namespace) -> int:
         )
         path = service.run()
         log.info("export_excel_finished", path=str(path))
+
+        # Chain to replicator if configured.
+        replicator = build_replicator_service(settings, RunsRepo(db, conn))
+        outcome = replicator.run(path)
+        if not outcome.skipped and outcome.info is not None:
+            log.info(
+                "export_excel_replicated",
+                file_id=outcome.info.file_id,
+                link=outcome.info.web_view_link,
+            )
+    return EXIT_OK
+
+
+def _cmd_replicate(args: argparse.Namespace) -> int:
+    log = get_logger("edx.cli")
+    settings_or_code = _load_settings_or_exit(args)
+    if isinstance(settings_or_code, int):
+        return settings_or_code
+    settings = settings_or_code
+
+    db = Database(settings.app.paths.state_db)
+    db.migrate()
+    with closing(db.connect()) as conn:
+        replicator = build_replicator_service(settings, RunsRepo(db, conn))
+        outcome = replicator.run(settings.app.paths.excel_path)
+    if outcome.skipped:
+        log.warning("replicate_skipped", reason=outcome.reason)
+        return EXIT_OK
+    log.info(
+        "replicate_finished",
+        file_id=outcome.info.file_id if outcome.info else None,
+        link=outcome.info.web_view_link if outcome.info else None,
+    )
+    return EXIT_OK
+
+
+def _cmd_auth_google_drive(args: argparse.Namespace) -> int:
+    log = get_logger("edx.cli")
+    settings_or_code = _load_settings_or_exit(args)
+    if isinstance(settings_or_code, int):
+        return settings_or_code
+    settings = settings_or_code
+
+    client_id_secret = settings.secrets.google_oauth_client_id
+    client_secret_secret = settings.secrets.google_oauth_client_secret
+    if client_id_secret is None or client_secret_secret is None:
+        log.error(
+            "oauth_missing_credentials",
+            message=(
+                "Set GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET "
+                "in .env first."
+            ),
+        )
+        return EXIT_RUNTIME_ERROR
+
+    # Imported lazily so test environments without google_auth_oauthlib
+    # binaries don't fail at parser-build time.
+    from google_auth_oauthlib.flow import InstalledAppFlow
+
+    flow = InstalledAppFlow.from_client_config(
+        {
+            "installed": {
+                "client_id": client_id_secret.get_secret_value(),
+                "client_secret": client_secret_secret.get_secret_value(),
+                "redirect_uris": ["http://localhost"],
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+            }
+        },
+        scopes=["https://www.googleapis.com/auth/drive.file"],
+    )
+    creds = flow.run_local_server(port=0)
+    refresh_token = getattr(creds, "refresh_token", None)
+    if not refresh_token:
+        log.error(
+            "oauth_no_refresh_token",
+            message=(
+                "Google did not return a refresh token. Re-run after "
+                "revoking previous app access at "
+                "https://myaccount.google.com/permissions."
+            ),
+        )
+        return EXIT_RUNTIME_ERROR
+    print(refresh_token)
+    log.info(
+        "oauth_drive_refresh_token_obtained",
+        message=(
+            "Paste the value above into .env as GOOGLE_OAUTH_REFRESH_TOKEN, "
+            "then re-run `edx replicate`."
+        ),
+    )
     return EXIT_OK
 
 

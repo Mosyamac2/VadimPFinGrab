@@ -9,6 +9,11 @@ from edx.stages.writer.excel import (
     WitrineSnapshot,
 )
 from edx.stages.writer.factory import build_writer_service
+from edx.stages.writer.replicator import (
+    ReplicateOutcome,
+    ReplicatorService,
+    build_replicator_service,
+)
 from edx.stages.writer.service import WriterService
 
 __all__ = [
@@ -17,7 +22,10 @@ __all__ = [
     "MetaSnapshot",
     "MetricExportRow",
     "QAIssueExportRow",
+    "ReplicateOutcome",
+    "ReplicatorService",
     "WitrineSnapshot",
     "WriterService",
+    "build_replicator_service",
     "build_writer_service",
 ]
