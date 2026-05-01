@@ -37,17 +37,30 @@
 
 ```bash
 sudo apt update
-sudo apt install -y git python3.11 python3.11-venv python3-pip \
+sudo apt install -y git python3 python3-venv python3-pip \
     unrar tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng poppler-utils
 ```
+
+> **Какой Python:** проекту нужен ≥ 3.11. Ubuntu **24.04** уже идёт с Python
+> 3.12 в `python3`, и команда выше всё ставит. На Ubuntu **22.04** в
+> `python3` стоит 3.10 — он слишком старый. Тогда:
+> ```bash
+> sudo add-apt-repository ppa:deadsnakes/ppa
+> sudo apt update
+> sudo apt install -y python3.11 python3.11-venv
+> ```
+> и в Шаге 3 запускайте `python3.11 -m venv .venv` вместо `python3 -m venv .venv`.
 
 Проверка:
 
 ```bash
-python3.11 --version       # 3.11.x
-unrar --version            # должен напечатать UNRAR ...
-tesseract --list-langs     # должны быть rus и eng
+python3 --version           # 3.11.x или 3.12.x
+unrar --version             # должен напечатать UNRAR ...
+tesseract --list-langs      # должны быть rus и eng
 ```
+
+Если `python3 --version` выдал 3.10 или ниже — переустановите через
+deadsnakes PPA как в подсказке выше.
 
 ---
 
@@ -58,7 +71,7 @@ sudo mkdir -p /opt/edx
 sudo chown $USER:$USER /opt/edx
 cd /opt/edx
 git clone https://github.com/Mosyamac2/VadimPFinGrab.git .
-python3.11 -m venv .venv
+python3 -m venv .venv          # на 22.04 — python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 ```
