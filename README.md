@@ -20,7 +20,8 @@ implementation is decomposed into 15 sequential prompts in
 - ✅ Prompt 07 — Text Extractor (native + OCR)
 - ✅ Prompt 08 — LLM provider chain (Anthropic + OpenRouter fallback)
 - ✅ Prompt 09 — Metric Extractor (LLM)
-- ⬜ Prompts 10–15 — pending
+- ✅ Prompt 10 — Event Extractor (LLM)
+- ⬜ Prompts 11–15 — pending
 
 ## System packages
 

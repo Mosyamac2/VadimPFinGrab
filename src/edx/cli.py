@@ -28,12 +28,14 @@ from edx.stages.classifier import build_classifier_service
 from edx.stages.discoverer import build_discoverer_service
 from edx.stages.discoverer.service import compute_since
 from edx.stages.downloader import build_downloader_service
+from edx.stages.event_extractor import build_event_extractor_service
 from edx.stages.metric_extractor import build_metric_extractor_service
 from edx.stages.text_extractor import build_text_extractor_service
 from edx.stages.unpacker import build_unpacker_service
 from edx.storage import (
     Database,
     DocumentsRepo,
+    EventsRepo,
     MetricsRepo,
     PublicationsRepo,
     RunsRepo,
@@ -170,6 +172,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Restrict extraction to specific publication IDs (repeatable).",
     )
     extract_metrics_p.set_defaults(func=_cmd_extract_metrics)
+
+    extract_events_p = subparsers.add_parser(
+        "extract-events",
+        help="Run the LLM Event Extractor over publications with publication_type='event'.",
+    )
+    extract_events_p.add_argument(
+        "--publication-id",
+        action="append",
+        help="Restrict extraction to specific publication IDs (repeatable).",
+    )
+    extract_events_p.set_defaults(func=_cmd_extract_events)
 
     cache_p = subparsers.add_parser(
         "cache",
@@ -542,6 +555,65 @@ def _cmd_extract_metrics(args: argparse.Namespace) -> int:
                 processed=len(outcomes),
                 rows_written=sum(o.rows_written for o in outcomes),
                 incomplete=sum(1 for o in outcomes if o.is_incomplete),
+            )
+            return EXIT_OK
+
+        return asyncio.run(_run())
+
+
+def _cmd_extract_events(args: argparse.Namespace) -> int:
+    log = get_logger("edx.cli")
+    settings_or_code = _load_settings_or_exit(args)
+    if isinstance(settings_or_code, int):
+        return settings_or_code
+    settings = settings_or_code
+
+    try:
+        llm_provider = build_llm_provider(settings)
+    except LLMUnavailableError as exc:
+        log.error("llm_unavailable", error=str(exc))
+        return EXIT_RUNTIME_ERROR
+
+    db = Database(settings.app.paths.state_db)
+    db.migrate()
+    with closing(db.connect()) as conn:
+        publications_repo = PublicationsRepo(db, conn)
+        documents_repo = DocumentsRepo(db, conn)
+        events_repo = EventsRepo(db, conn)
+
+        targets = _select_publications(
+            publications_repo,
+            status="extracted",
+            publication_ids=args.publication_id,
+        )
+        event_targets = [p for p in targets if p.publication_type == "event"]
+        if not event_targets:
+            log.info("extract_events_no_pending_publications")
+            return EXIT_OK
+
+        service = build_event_extractor_service(
+            settings,
+            publications_repo,
+            documents_repo,
+            events_repo,
+            llm_provider,
+        )
+
+        async def _run() -> int:
+            outcomes = await service.run(event_targets)
+            log.info(
+                "extract_events_finished",
+                publications=len(event_targets),
+                processed=len(outcomes),
+                fallback_event_type=sum(
+                    1 for o in outcomes if o.used_fallback_event_type
+                ),
+                fallback_event_date=sum(
+                    1 for o in outcomes if o.used_fallback_event_date
+                ),
+                summary_truncated=sum(
+                    1 for o in outcomes if o.summary_truncated
+                ),
             )
             return EXIT_OK
 
