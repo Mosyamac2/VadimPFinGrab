@@ -56,6 +56,24 @@ class DiscovererConfig(BaseModel):
     respect_robots: bool = True
 
 
+class DownloaderConfig(BaseModel):
+    """Downloader stage knobs (ТЗ §7.1 п.2)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    concurrency: int = Field(default=4, ge=1, le=64)
+    follow_html_links: bool = True
+    chunk_size_bytes: int = Field(default=64 * 1024, ge=1024)
+
+
+class UnpackerConfig(BaseModel):
+    """Unpacker stage safety limits (ТЗ §7.1 п.3)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_unpacked_mb: int = Field(default=500, ge=1)
+
+
 class AppConfig(BaseModel):
     """Top-level ``app.yaml``."""
 
@@ -65,4 +83,6 @@ class AppConfig(BaseModel):
     schedule: AppSchedule = Field(default_factory=AppSchedule)
     mode: AppMode = Field(default_factory=AppMode)
     discoverer: DiscovererConfig = Field(default_factory=DiscovererConfig)
+    downloader: DownloaderConfig = Field(default_factory=DownloaderConfig)
+    unpacker: UnpackerConfig = Field(default_factory=UnpackerConfig)
     contact_email: str | None = None

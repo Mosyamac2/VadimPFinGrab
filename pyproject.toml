@@ -28,6 +28,7 @@ dependencies = [
     "selectolax>=0.3.21",
     "tenacity>=8.2",
     "aiolimiter>=1.1",
+    "rarfile>=4.2",
 ]
 
 [project.optional-dependencies]
@@ -78,7 +79,7 @@ explicit_package_bases = true
 namespace_packages = true
 
 [[tool.mypy.overrides]]
-module = ["structlog.*", "selectolax.*", "aiolimiter.*"]
+module = ["structlog.*", "selectolax.*", "aiolimiter.*", "rarfile.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

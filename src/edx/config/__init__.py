@@ -6,6 +6,8 @@ from edx.config.app_config import (
     AppPaths,
     AppSchedule,
     DiscovererConfig,
+    DownloaderConfig,
+    UnpackerConfig,
 )
 from edx.config.event_types_config import EventTypesConfig, EventTypeSpec
 from edx.config.llm_config import (
@@ -29,6 +31,7 @@ __all__ = [
     "AppSettings",
     "ConfigLoadError",
     "DiscovererConfig",
+    "DownloaderConfig",
     "EventTypeSpec",
     "EventTypesConfig",
     "LLMConfig",
@@ -40,5 +43,6 @@ __all__ = [
     "Secrets",
     "TickerEntry",
     "TickersConfig",
+    "UnpackerConfig",
     "load_all",
 ]

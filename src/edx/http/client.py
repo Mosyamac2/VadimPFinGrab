@@ -11,7 +11,11 @@ Combines:
 
 from __future__ import annotations
 
+import hashlib
+import os
 import time
+from dataclasses import dataclass
+from pathlib import Path
 from types import TracebackType
 from typing import Any
 
@@ -27,11 +31,12 @@ from tenacity import (
 
 from edx import __version__
 from edx.config import AppSettings
-from edx.http.exceptions import RobotsDisallowedError
+from edx.http.exceptions import RobotsDisallowedError, ScrapeFailedError
 from edx.http.robots import RobotsCache
 from edx.logging_setup import get_logger
 
 RETRYABLE_STATUSES: frozenset[int] = frozenset({429, 502, 503, 504})
+DEFAULT_DOWNLOAD_CHUNK = 64 * 1024
 
 
 class _RetryableHTTPError(Exception):
@@ -40,6 +45,17 @@ class _RetryableHTTPError(Exception):
     def __init__(self, response: httpx.Response) -> None:
         self.response = response
         super().__init__(f"retryable HTTP status {response.status_code}")
+
+
+@dataclass(frozen=True)
+class DownloadResult:
+    """Outcome of :meth:`EDisclosureClient.download`."""
+
+    target: Path
+    sha256: str
+    bytes_written: int
+    content_type: str | None
+    status_code: int
 
 
 def build_user_agent(settings: AppSettings) -> str:
@@ -114,6 +130,98 @@ class EDisclosureClient:
 
     async def close(self) -> None:
         await self._client.aclose()
+
+    async def download(
+        self,
+        url: str,
+        target: Path,
+        *,
+        chunk_size: int = DEFAULT_DOWNLOAD_CHUNK,
+    ) -> DownloadResult:
+        """Stream ``url`` into ``target``, with retries and atomic replace.
+
+        Internals:
+        - Robots check is honoured (same as :meth:`get`).
+        - Body is streamed into ``{target}.partial``; on any error the partial
+          is removed before the next retry.
+        - On success the partial is renamed atomically to ``target``.
+        - SHA-256 is computed on the fly so we don't re-read the file.
+        - 5xx/429 bodies are drained, then a tenacity retry is triggered;
+          ``Retry-After`` is honoured by ``_build_wait_strategy``.
+        - After retries are exhausted, raises ``ScrapeFailedError``.
+        """
+        if self.respect_robots:
+            allowed = await self._robots.is_allowed(url)
+            if not allowed:
+                raise RobotsDisallowedError(url)
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        partial = target.with_name(target.name + ".partial")
+
+        async def _attempt() -> DownloadResult:
+            if partial.exists():
+                partial.unlink()
+            async with self._limiter:
+                t0 = time.monotonic()
+                try:
+                    async with self._client.stream("GET", url) as response:
+                        if response.status_code in RETRYABLE_STATUSES:
+                            await response.aread()
+                            raise _RetryableHTTPError(response)
+                        if response.status_code != 200:
+                            await response.aread()
+                            raise ScrapeFailedError(
+                                f"HTTP {response.status_code} for {url}"
+                            )
+
+                        sha = hashlib.sha256()
+                        bytes_written = 0
+                        with open(partial, "wb") as fh:
+                            async for chunk in response.aiter_bytes(chunk_size):
+                                fh.write(chunk)
+                                sha.update(chunk)
+                                bytes_written += len(chunk)
+                        content_type = response.headers.get("Content-Type")
+                except BaseException:
+                    if partial.exists():
+                        partial.unlink()
+                    raise
+                elapsed = time.monotonic() - t0
+
+            os.replace(partial, target)
+            self._log.info(
+                "http_download",
+                url=url,
+                target=str(target),
+                bytes=bytes_written,
+                elapsed_s=round(elapsed, 4),
+            )
+            return DownloadResult(
+                target=target,
+                sha256=sha.hexdigest(),
+                bytes_written=bytes_written,
+                content_type=content_type,
+                status_code=200,
+            )
+
+        retrier: AsyncRetrying = AsyncRetrying(
+            stop=stop_after_attempt(self._max_retries + 1),
+            wait=self._build_wait_strategy(),
+            retry=retry_if_exception_type(
+                (httpx.TransportError, _RetryableHTTPError)
+            ),
+            reraise=True,
+        )
+        try:
+            result: DownloadResult = await retrier(_attempt)
+        except _RetryableHTTPError as exc:
+            if partial.exists():
+                partial.unlink()
+            raise ScrapeFailedError(
+                f"download failed after retries: HTTP "
+                f"{exc.response.status_code} for {url}"
+            ) from exc
+        return result
 
     async def get(self, url: str) -> httpx.Response:
         """Idempotent GET with rate-limit, robots-check, and retry on transient errors."""

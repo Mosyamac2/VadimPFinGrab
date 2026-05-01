@@ -19,11 +19,20 @@ import yaml
 
 from edx import __version__
 from edx.config import AppSettings, ConfigLoadError, load_all
+from edx.http.client import EDisclosureClient, build_user_agent
 from edx.logging_setup import configure, get_logger
 from edx.stages.discoverer import build_discoverer_service
 from edx.stages.discoverer.service import compute_since
-from edx.storage import Database, PublicationsRepo, RunsRepo, TickersRepo
-from edx.storage.models import RunMode
+from edx.stages.downloader import build_downloader_service
+from edx.stages.unpacker import build_unpacker_service
+from edx.storage import (
+    Database,
+    DocumentsRepo,
+    PublicationsRepo,
+    RunsRepo,
+    TickersRepo,
+)
+from edx.storage.models import PublicationStatus, RunMode
 
 EXIT_OK = 0
 EXIT_CONFIG_ERROR = 2
@@ -99,6 +108,28 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     discover_p.set_defaults(func=_cmd_discover)
+
+    download_p = subparsers.add_parser(
+        "download",
+        help="Download already-discovered publications into data/raw/.",
+    )
+    download_p.add_argument(
+        "--publication-id",
+        action="append",
+        help="Restrict download to specific publication IDs (repeatable).",
+    )
+    download_p.set_defaults(func=_cmd_download)
+
+    unpack_p = subparsers.add_parser(
+        "unpack",
+        help="Unpack downloaded archives and inventory publication contents.",
+    )
+    unpack_p.add_argument(
+        "--publication-id",
+        action="append",
+        help="Restrict unpacking to specific publication IDs (repeatable).",
+    )
+    unpack_p.set_defaults(func=_cmd_unpack)
 
     return parser
 
@@ -227,6 +258,98 @@ def _cmd_discover(args: argparse.Namespace) -> int:
             return EXIT_OK
 
         return asyncio.run(_run())
+
+
+def _select_publications(
+    publications_repo: PublicationsRepo,
+    *,
+    status: PublicationStatus,
+    publication_ids: list[str] | None,
+) -> list:  # type: ignore[type-arg]
+    rows = publications_repo.list_by_status(status)
+    if publication_ids is None:
+        return rows
+    requested = set(publication_ids)
+    return [r for r in rows if r.publication_id in requested]
+
+
+def _cmd_download(args: argparse.Namespace) -> int:
+    log = get_logger("edx.cli")
+    settings_or_code = _load_settings_or_exit(args)
+    if isinstance(settings_or_code, int):
+        return settings_or_code
+    settings = settings_or_code
+
+    db = Database(settings.app.paths.state_db)
+    db.migrate()
+    with closing(db.connect()) as conn:
+        publications_repo = PublicationsRepo(db, conn)
+        targets = _select_publications(
+            publications_repo,
+            status="discovered",
+            publication_ids=args.publication_id,
+        )
+        if not targets:
+            log.info("download_no_pending_publications")
+            return EXIT_OK
+
+        async def _run() -> int:
+            async with EDisclosureClient(
+                base_url=settings.app.discoverer.base_url,
+                user_agent=build_user_agent(settings),
+                requests_per_second=settings.app.discoverer.requests_per_second,
+                request_timeout_s=settings.app.discoverer.request_timeout_s,
+                max_retries=settings.app.discoverer.max_retries,
+                retry_min_wait_s=settings.app.discoverer.retry_min_wait_s,
+                retry_max_wait_s=settings.app.discoverer.retry_max_wait_s,
+                respect_robots=settings.app.discoverer.respect_robots,
+            ) as client:
+                service = build_downloader_service(
+                    settings, publications_repo, client=client
+                )
+                outcomes = await service.run(targets)
+            log.info(
+                "download_finished",
+                publications=len(targets),
+                downloaded=sum(1 for o in outcomes if not o.skipped),
+                skipped=sum(1 for o in outcomes if o.skipped),
+            )
+            return EXIT_OK
+
+        return asyncio.run(_run())
+
+
+def _cmd_unpack(args: argparse.Namespace) -> int:
+    log = get_logger("edx.cli")
+    settings_or_code = _load_settings_or_exit(args)
+    if isinstance(settings_or_code, int):
+        return settings_or_code
+    settings = settings_or_code
+
+    db = Database(settings.app.paths.state_db)
+    db.migrate()
+    with closing(db.connect()) as conn:
+        publications_repo = PublicationsRepo(db, conn)
+        documents_repo = DocumentsRepo(db, conn)
+        targets = _select_publications(
+            publications_repo,
+            status="downloaded",
+            publication_ids=args.publication_id,
+        )
+        if not targets:
+            log.info("unpack_no_pending_publications")
+            return EXIT_OK
+        service = build_unpacker_service(
+            settings, db, publications_repo, documents_repo
+        )
+        outcomes = service.run(targets)
+        log.info(
+            "unpack_finished",
+            publications=len(targets),
+            archives_extracted=sum(o.archives_extracted for o in outcomes),
+            documents_added=sum(o.documents_added for o in outcomes),
+        )
+    return EXIT_OK
 
 
 def _cmd_config_check(args: argparse.Namespace) -> int:

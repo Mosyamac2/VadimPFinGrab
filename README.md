@@ -13,7 +13,22 @@ implementation is decomposed into 15 sequential prompts in
 
 - ✅ Prompt 01 — project scaffolding
 - ✅ Prompt 02 — configuration & secrets
-- ⬜ Prompts 03–15 — pending
+- ✅ Prompt 03 — SQLite state DB + repositories
+- ✅ Prompt 04 — HTTP client + Discoverer stage
+- ✅ Prompt 05 — Downloader + Unpacker stages
+- ⬜ Prompts 06–15 — pending
+
+## System packages
+
+The pipeline needs a few system-level tools beyond Python wheels:
+
+```bash
+# Required to extract RAR archives produced by some issuers' submissions.
+sudo apt install unrar
+```
+
+Without `unrar`, RAR-archived publications are skipped with a warning; ZIP
+archives still work.
 
 ## Quick start
 

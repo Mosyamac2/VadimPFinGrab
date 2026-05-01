@@ -31,6 +31,20 @@ discoverer:
   # permission from the source. The pipeline will log a WARNING on startup.
   respect_robots: true
 
+downloader:
+  # Number of publications downloaded in parallel.
+  concurrency: 4
+  # If true, when source_url returns HTML, parse it for document links and
+  # download referenced PDF/RAR/ZIP files into a `linked/` subdirectory.
+  follow_html_links: true
+  # Stream chunk size for large RAR/PDF downloads.
+  chunk_size_bytes: 65536
+
+unpacker:
+  # Hard cap on the total uncompressed size of an extracted archive (MB).
+  # ZIP/RAR contents that would exceed this cap fail the publication.
+  max_unpacked_mb: 500
+
 # Optional contact email — embedded into the User-Agent header used for
 # scraping e-disclosure.ru. Leave empty if you do not want to expose it.
 contact_email: null
