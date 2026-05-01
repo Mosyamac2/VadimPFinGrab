@@ -9,6 +9,7 @@ the ``runs`` journal, and dispatching to the eventual orchestrator.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 from collections.abc import Sequence
 from contextlib import closing
@@ -19,7 +20,9 @@ import yaml
 from edx import __version__
 from edx.config import AppSettings, ConfigLoadError, load_all
 from edx.logging_setup import configure, get_logger
-from edx.storage import Database, RunsRepo, TickersRepo
+from edx.stages.discoverer import build_discoverer_service
+from edx.stages.discoverer.service import compute_since
+from edx.storage import Database, PublicationsRepo, RunsRepo, TickersRepo
 from edx.storage.models import RunMode
 
 EXIT_OK = 0
@@ -82,6 +85,20 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Output format (default: yaml).",
     )
     config_check_p.set_defaults(func=_cmd_config_check)
+
+    discover_p = subparsers.add_parser(
+        "discover",
+        help="Run only the Discoverer stage (debug / single-stage replay).",
+    )
+    discover_p.add_argument(
+        "--ticker",
+        action="append",
+        help=(
+            "Restrict discovery to one or more tickers. May be passed multiple "
+            "times. Default: all tickers from tickers.yaml."
+        ),
+    )
+    discover_p.set_defaults(func=_cmd_discover)
 
     return parser
 
@@ -162,6 +179,54 @@ def _cmd_run(args: argparse.Namespace) -> int:
         return settings_or_code
     mode: RunMode = "full_reload" if args.full_reload else "update"
     return _execute_pipeline_run(settings_or_code, mode=mode)
+
+
+def _cmd_discover(args: argparse.Namespace) -> int:
+    log = get_logger("edx.cli")
+    settings_or_code = _load_settings_or_exit(args)
+    if isinstance(settings_or_code, int):
+        return settings_or_code
+    settings = settings_or_code
+
+    db = Database(settings.app.paths.state_db)
+    db.migrate()
+
+    with closing(db.connect()) as conn:
+        TickersRepo(db, conn).upsert_from_config(settings.tickers.tickers)
+        publications_repo = PublicationsRepo(db, conn)
+
+        ticker_filter: set[str] | None = (
+            set(args.ticker) if args.ticker else None
+        )
+        target_tickers = [
+            t
+            for t in settings.tickers.tickers
+            if ticker_filter is None or t.ticker in ticker_filter
+        ]
+        if ticker_filter and not target_tickers:
+            log.error(
+                "discover_no_matching_tickers", requested=sorted(ticker_filter)
+            )
+            return EXIT_RUNTIME_ERROR
+
+        since = compute_since(publications_repo, target_tickers)
+
+        async def _run() -> int:
+            service, client = build_discoverer_service(
+                settings, publications_repo
+            )
+            try:
+                new_pubs = await service.run(target_tickers, since)
+            finally:
+                await client.close()
+            log.info(
+                "discover_finished",
+                tickers=[t.ticker for t in target_tickers],
+                new_publications=len(new_pubs),
+            )
+            return EXIT_OK
+
+        return asyncio.run(_run())
 
 
 def _cmd_config_check(args: argparse.Namespace) -> int:

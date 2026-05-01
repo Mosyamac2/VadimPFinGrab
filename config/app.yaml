@@ -18,6 +18,19 @@ mode:
   backfill_years: 3
   default_run_mode: update
 
+discoverer:
+  base_url: https://www.e-disclosure.ru
+  # Hard cap on outbound requests per second. e-disclosure.ru asks scrapers
+  # to be polite — keep this conservative.
+  requests_per_second: 1.0
+  request_timeout_s: 30
+  max_retries: 3
+  retry_min_wait_s: 0.5
+  retry_max_wait_s: 10
+  # When false, robots.txt is ignored. Set to false only if you have written
+  # permission from the source. The pipeline will log a WARNING on startup.
+  respect_robots: true
+
 # Optional contact email — embedded into the User-Agent header used for
 # scraping e-disclosure.ru. Leave empty if you do not want to expose it.
 contact_email: null

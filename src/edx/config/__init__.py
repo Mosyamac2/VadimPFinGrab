@@ -1,6 +1,12 @@
 """Pydantic-validated configuration for the e-disclosure extractor."""
 
-from edx.config.app_config import AppConfig, AppMode, AppPaths, AppSchedule
+from edx.config.app_config import (
+    AppConfig,
+    AppMode,
+    AppPaths,
+    AppSchedule,
+    DiscovererConfig,
+)
 from edx.config.event_types_config import EventTypesConfig, EventTypeSpec
 from edx.config.llm_config import (
     AnthropicProviderConfig,
@@ -22,6 +28,7 @@ __all__ = [
     "AppSchedule",
     "AppSettings",
     "ConfigLoadError",
+    "DiscovererConfig",
     "EventTypeSpec",
     "EventTypesConfig",
     "LLMConfig",
