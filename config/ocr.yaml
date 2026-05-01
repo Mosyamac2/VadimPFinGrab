@@ -1,0 +1,18 @@
+# OCR engine for scanned PDFs (ТЗ §8).
+#
+# `tesseract` runs locally and is the default. Cloud engines are wired through
+# the same interface but require additional credentials and are billed.
+
+engine: tesseract
+
+tesseract_langs:
+  - rus
+  - eng
+tesseract_dpi: 300
+
+yandex_vision:
+  folder_id: null
+  endpoint: https://ocr.api.cloud.yandex.net
+
+google_vision:
+  endpoint: https://vision.googleapis.com

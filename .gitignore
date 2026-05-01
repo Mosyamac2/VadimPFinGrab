@@ -1,0 +1,62 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Distribution / packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+*.egg
+MANIFEST
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# Editors
+.vscode/
+*.swp
+.DS_Store
+
+# --- Project secrets and runtime artefacts ---
+.env
+
+# Pipeline runtime state — keep .gitkeep so the directory survives
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+data/state.sqlite
+data/state.sqlite-journal
+data/state.sqlite-wal
+data/state.sqlite-shm
+
+output/*
+!output/.gitkeep
+
+logs/*
+!logs/.gitkeep

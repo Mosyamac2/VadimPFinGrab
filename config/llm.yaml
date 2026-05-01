@@ -1,0 +1,23 @@
+# LLM provider configuration (ТЗ §17).
+#
+# Primary channel: direct Anthropic API (better PDF support, prompt caching).
+# Fallback channel: OpenRouter — used automatically when the primary key is
+# missing or the API call fails after `max_retries` retries.
+
+primary:
+  enabled: true
+  model: claude-sonnet-4-6
+  enable_pdf_input: true
+  enable_prompt_caching: true
+
+fallback:
+  enabled: true
+  model: anthropic/claude-sonnet-4.6
+  base_url: https://openrouter.ai/api/v1
+
+# Shared limits applied per-call to whichever channel is active.
+max_tokens: 4096
+temperature: 0.0
+request_timeout_s: 120
+max_retries: 3
+concurrency: 4

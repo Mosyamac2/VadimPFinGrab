@@ -1,0 +1,29 @@
+# Issuers to scrape from e-disclosure.ru.
+#
+# The default list below is a SEED with three placeholder entries (Sber, Gazprom,
+# Lukoil). The full Top-50 MOEX list must be filled in manually by the operator
+# during initial setup — replace `e_disclosure_id: REPLACE_ME` with the real
+# numeric identifier from the issuer's e-disclosure card URL.
+#
+# Optional fields:
+#   inn / ogrn — for downstream cross-references; not required for scraping.
+#   priority_override — overrides metrics.reporting_priority for this issuer.
+
+tickers:
+  - ticker: SBER
+    e_disclosure_id: REPLACE_ME
+    name: ПАО Сбербанк
+    inn: "7707083893"
+    ogrn: "1027700132195"
+
+  - ticker: GAZP
+    e_disclosure_id: REPLACE_ME
+    name: ПАО Газпром
+    inn: "7736050003"
+    ogrn: "1027700070518"
+
+  - ticker: LKOH
+    e_disclosure_id: REPLACE_ME
+    name: ПАО ЛУКОЙЛ
+    inn: "7708004767"
+    ogrn: "1027700035769"

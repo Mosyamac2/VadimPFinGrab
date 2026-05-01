@@ -1,0 +1,23 @@
+# Application-wide configuration. Reloaded on every pipeline run.
+# All file paths are relative to the project root.
+
+paths:
+  data_dir: data
+  raw_dir: data/raw
+  processed_dir: data/processed
+  state_db: data/state.sqlite
+  output_dir: output
+  excel_path: output/e-disclosure.xlsx
+  logs_dir: logs
+
+schedule:
+  cron_time: "04:00"
+  timezone: Europe/Moscow
+
+mode:
+  backfill_years: 3
+  default_run_mode: update
+
+# Optional contact email — embedded into the User-Agent header used for
+# scraping e-disclosure.ru. Leave empty if you do not want to expose it.
+contact_email: null

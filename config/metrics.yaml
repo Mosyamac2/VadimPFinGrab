@@ -1,0 +1,78 @@
+# Financial metrics to extract from each report (ТЗ §5).
+#
+# `reporting_priority` controls which standard wins when an issuer publishes
+# both: IFRS first, RSBU only if IFRS is unavailable.
+#
+# Each metric has a single canonical name (used as the column key in Excel) and
+# a list of synonyms per reporting standard — this list is fed into the LLM
+# prompt to lift extraction recall.
+#
+# `unit` is the unit assumed in the source document; the pipeline normalises
+# everything to absolute values (`ones`) before storing.
+#
+# `formula` lets the pipeline derive a missing metric from sibling metrics that
+# *were* extracted. References use `canonical_name` of the inputs.
+
+reporting_priority:
+  - IFRS
+  - RSBU
+
+metrics:
+  - canonical_name: revenue
+    synonyms_ifrs:
+      - Revenue
+      - Total revenue
+      - Sales
+      - Net sales
+    synonyms_rsbu:
+      - Выручка
+      - Выручка (нетто)
+      - Доходы от обычных видов деятельности
+    unit: ones
+    currency: RUB
+
+  - canonical_name: ebitda
+    synonyms_ifrs:
+      - EBITDA
+      - Adjusted EBITDA
+      - Operating profit before depreciation and amortisation
+    synonyms_rsbu:
+      - EBITDA
+    unit: ones
+    currency: RUB
+    formula: net_income + depreciation_amortization + interest_expense + tax_expense
+
+  - canonical_name: net_income
+    synonyms_ifrs:
+      - Net income
+      - Net profit
+      - Profit for the year
+      - Profit attributable to shareholders
+    synonyms_rsbu:
+      - Чистая прибыль
+      - Чистая прибыль отчётного периода
+    unit: ones
+    currency: RUB
+
+  - canonical_name: total_assets
+    synonyms_ifrs:
+      - Total assets
+    synonyms_rsbu:
+      - Активы
+      - Итого активов
+      - Баланс (актив)
+    unit: ones
+    currency: RUB
+
+  - canonical_name: total_debt
+    synonyms_ifrs:
+      - Total debt
+      - Borrowings
+      - Loans and borrowings
+      - Interest-bearing liabilities
+    synonyms_rsbu:
+      - Заёмные средства
+      - Кредиты и займы
+      - Долгосрочные обязательства - заёмные средства
+    unit: ones
+    currency: RUB

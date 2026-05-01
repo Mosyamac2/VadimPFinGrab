@@ -1,0 +1,78 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "e-disclosure-extractor"
+version = "0.1.0"
+description = "ETL pipeline that extracts financial reporting from e-disclosure.ru using LLMs."
+readme = "TZ_e-disclosure_extractor.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [
+    { name = "VadimP project" },
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Office/Business :: Financial",
+]
+dependencies = [
+    "structlog>=24.1",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.1",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "types-PyYAML>=6.0",
+]
+
+[project.scripts]
+edx = "edx.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "W",
+    "I",
+    "B",
+    "UP",
+    "SIM",
+]
+ignore = []
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src"]
+mypy_path = "src"
+explicit_package_bases = true
+namespace_packages = true
+
+[[tool.mypy.overrides]]
+module = ["structlog.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

@@ -1,0 +1,54 @@
+# Material-event taxonomy (ТЗ §6).
+#
+# `code` is the stable enum value persisted in `events.event_type`.
+# `display_name` is what shows up in the Excel mart and dashboards.
+# `aliases` are hints fed to the LLM classifier; not required to be exhaustive.
+# `other` is the mandatory fallback bucket — events that don't match anything
+# else end up here.
+
+event_types:
+  - code: dividends
+    display_name: Дивиденды
+    aliases:
+      - Объявление дивидендов
+      - Решение о выплате дивидендов
+      - Утверждение размера дивиденда
+
+  - code: management_change
+    display_name: Смена менеджмента
+    aliases:
+      - Назначение генерального директора
+      - Прекращение полномочий
+      - Изменение состава исполнительных органов
+
+  - code: m_and_a
+    display_name: M&A
+    aliases:
+      - Сделка слияния
+      - Поглощение
+      - Приобретение контроля
+
+  - code: material_transaction
+    display_name: Существенная сделка
+    aliases:
+      - Крупная сделка
+      - Сделка с заинтересованностью
+
+  - code: corporate_action
+    display_name: Корпоративное действие
+    aliases:
+      - Реорганизация
+      - Дробление акций
+      - Выкуп акций
+      - Объявление выпуска ценных бумаг
+
+  - code: shareholder_change
+    display_name: Изменение в составе акционеров
+    aliases:
+      - Уведомление о пакете акций
+      - Изменение доли участия
+      - Раскрытие бенефициаров
+
+  - code: other
+    display_name: Прочее
+    description: Fallback for events that do not fit any other category.
