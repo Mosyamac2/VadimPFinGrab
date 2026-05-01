@@ -394,6 +394,7 @@ def _execute_pipeline_run(
                     publications_repo=publications_repo,
                     metrics_repo=metrics_repo,
                     events_repo=events_repo,
+                    qa_issues_repo=qa_issues_repo,
                     stages=bundle,
                     ticker_entries=settings.tickers.tickers,
                     excel_path=settings.app.paths.excel_path,

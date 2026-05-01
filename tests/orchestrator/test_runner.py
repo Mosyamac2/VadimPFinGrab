@@ -19,6 +19,7 @@ from edx.storage import (
     MetricsRepo,
     PublicationRow,
     PublicationsRepo,
+    QAIssuesRepo,
     RunsRepo,
     TickersRepo,
 )
@@ -127,6 +128,7 @@ class _Workspace:
     metrics_repo: MetricsRepo
     events_repo: EventsRepo
     runs_repo: RunsRepo
+    qa_issues_repo: QAIssuesRepo
 
 
 @pytest.fixture
@@ -138,6 +140,7 @@ def workspace(tmp_path: Path) -> _Workspace:
     metrics_repo = MetricsRepo(db, conn)
     events_repo = EventsRepo(db, conn)
     runs_repo = RunsRepo(db, conn)
+    qa_issues_repo = QAIssuesRepo(db, conn)
     TickersRepo(db, conn).upsert_from_config(
         [TickerEntry(ticker="SBER", e_disclosure_id="1", name="Sberbank")]
     )
@@ -148,6 +151,7 @@ def workspace(tmp_path: Path) -> _Workspace:
         metrics_repo=metrics_repo,
         events_repo=events_repo,
         runs_repo=runs_repo,
+        qa_issues_repo=qa_issues_repo,
     )
 
 
@@ -201,6 +205,7 @@ def _build_orchestrator(
         publications_repo=workspace.publications_repo,
         metrics_repo=workspace.metrics_repo,
         events_repo=workspace.events_repo,
+        qa_issues_repo=workspace.qa_issues_repo,
         stages=bundle,
         ticker_entries=[
             TickerEntry(ticker="SBER", e_disclosure_id="1", name="Sberbank")

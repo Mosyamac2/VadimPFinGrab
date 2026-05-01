@@ -1,0 +1,31 @@
+# e-disclosure extractor — systemd service unit.
+#
+# Replace /opt/edx with your install path and the User= value with the
+# operating user (NOT root — the project runs against a personal Google
+# account via OAuth refresh token).
+#
+# Install with:
+#   sudo cp deploy/systemd/edx-update.service /etc/systemd/system/
+#   sudo cp deploy/systemd/edx-update.timer   /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now edx-update.timer
+
+[Unit]
+Description=e-disclosure extractor — daily incremental update
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/edx
+ExecStart=/opt/edx/.venv/bin/edx update
+# Honour the .env at the project root so secrets stay in one place.
+EnvironmentFile=-/opt/edx/.env
+User=edx
+Group=edx
+# Hard-cap per-run wall time. Cron-style runs should finish well within
+# this; a stuck OAuth handshake will be killed instead of hanging the timer.
+TimeoutStartSec=2h
+
+[Install]
+WantedBy=multi-user.target

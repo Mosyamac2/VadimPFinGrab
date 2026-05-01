@@ -1,0 +1,14 @@
+# e-disclosure extractor — daily cron entry.
+#
+# The 04:00 default below is the operational time documented in
+# config/app.yaml → schedule.cron_time. Keep this entry in sync with the YAML
+# (or, if you change one, change both).
+#
+# Install with:
+#   crontab -u <user> /opt/edx/deploy/cron/edx.crontab
+#
+# Replace /opt/edx with the actual project path. ``env -i`` strips the host
+# environment so the secrets in .env are the only source of API keys.
+
+# m  h  dom mon dow  command
+0    4  *   *   *    /usr/bin/env -i HOME=$HOME PATH=/usr/local/bin:/usr/bin:/bin /opt/edx/.venv/bin/edx update >> /opt/edx/logs/cron.log 2>&1

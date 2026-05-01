@@ -1,105 +1,223 @@
 # e-disclosure extractor
 
-ETL pipeline that scrapes financial reporting from
-[e-disclosure.ru](https://www.e-disclosure.ru/), extracts metrics from PDF
-reports via an LLM, and replicates the result to Google Drive as an Excel mart.
+ETL-пайплайн, который раз в сутки забирает финансовую отчётность Top-50
+эмитентов Московской биржи с портала
+[e-disclosure.ru](https://www.e-disclosure.ru/), извлекает ключевые
+показатели через LLM, валидирует их и публикует Excel-витрину на Google
+Drive вместе со сквозным потоком сообщений о существенных фактах.
 
-The full requirement spec is in
-[`TZ_e-disclosure_extractor.md`](TZ_e-disclosure_extractor.md). The
-implementation is decomposed into 15 sequential prompts in
-[`prompts/`](prompts/README.md).
+Полное техническое задание: [`TZ_e-disclosure_extractor.md`](TZ_e-disclosure_extractor.md).
+Серия implementation-промптов: [`prompts/README.md`](prompts/README.md).
 
-## Status
+---
 
-- ✅ Prompt 01 — project scaffolding
-- ✅ Prompt 02 — configuration & secrets
-- ✅ Prompt 03 — SQLite state DB + repositories
-- ✅ Prompt 04 — HTTP client + Discoverer stage
-- ✅ Prompt 05 — Downloader + Unpacker stages
-- ✅ Prompt 06 — PDF Classifier stage
-- ✅ Prompt 07 — Text Extractor (native + OCR)
-- ✅ Prompt 08 — LLM provider chain (Anthropic + OpenRouter fallback)
-- ✅ Prompt 09 — Metric Extractor (LLM)
-- ✅ Prompt 10 — Event Extractor (LLM)
-- ✅ Prompt 11 — Validator (sanity checks + qa_issues)
-- ✅ Prompt 12 — Writer (SQLite mart + Excel)
-- ✅ Prompt 13 — Google Drive replication
-- ✅ Prompt 14 — Orchestrator (DAG + edx update / run / status)
-- ⬜ Prompt 15 — pending
+## 1. Кому это нужно
 
-## System packages
+Аналитику или CFO-офису, которому раз в сутки требуется одна Excel-таблица
+со сравнимыми показателями десятков эмитентов и хронологией существенных
+фактов. Запуск локальный, на одной Linux-машине, без серверной
+инфраструктуры — данные ходят только между e-disclosure → диск → Anthropic
+(через прямой API или OpenRouter) → Google Drive.
 
-The pipeline needs a few system-level tools beyond Python wheels:
+## 2. Системные требования
+
+| Что | Версия | Примечание |
+|---|---|---|
+| Python | ≥ 3.11 | целевая платформа Linux |
+| Системные пакеты | `unrar`, `tesseract-ocr`, `tesseract-ocr-rus`, `tesseract-ocr-eng`, `poppler-utils` | RAR + OCR |
+| Anthropic API ключ | один из двух | прямой API даёт нативный PDF-input |
+| OpenRouter API ключ | один из двух | fallback при недоступности Anthropic |
+| Google аккаунт | OAuth Desktop client | для репликации Excel на Drive |
 
 ```bash
-# Required to extract RAR archives produced by some issuers' submissions.
-sudo apt install unrar
-# Required to OCR scanned PDFs (Tesseract + Russian/English language packs +
-# poppler-utils for the pdf2image bridge).
-sudo apt install tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng poppler-utils
+sudo apt install unrar tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng poppler-utils
 ```
 
-Without `unrar`, RAR-archived publications are skipped with a warning; ZIP
-archives still work. Without Tesseract / poppler, scanned PDFs cannot be OCR'd
-and the publication is marked failed at the Text Extractor stage; native
-machine-readable PDFs still process.
+Без `unrar` RAR-публикации помечаются `failed`; ZIP всё ещё работает.
+Без Tesseract / poppler сканированные PDF не OCR-ятся, машинно-читаемые —
+работают.
 
-## Quick start
+## 3. Установка
 
 ```bash
+git clone https://github.com/Mosyamac2/VadimPFinGrab.git edx
+cd edx
 python3.11 -m venv .venv
 source .venv/bin/activate
-make install
-cp .env.example .env             # then fill the required keys
-edx config check                 # validates all YAML and prints loaded values
-edx update                       # runs an incremental pass (stub for now)
+pip install -e .
+sudo apt install unrar tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng poppler-utils
+
+cp .env.example .env
+$EDITOR .env                # положить ключи API
+
+edx config check            # валидирует все YAML и печатает значения с маскированием секретов
+edx auth google-drive       # один раз; вставить refresh_token в .env как GOOGLE_OAUTH_REFRESH_TOKEN
 ```
 
-CLI shape:
+После `edx auth google-drive` в `.env` должны лежать
+`ANTHROPIC_API_KEY` (или `OPENROUTER_API_KEY`),
+`GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`,
+`GOOGLE_OAUTH_REFRESH_TOKEN`.
 
-| Command | Purpose |
+## 4. Конфигурация
+
+Все настройки в YAML под `config/`, валидируются Pydantic при старте.
+`.env` (вне Git) — только секреты.
+
+| Файл | Назначение |
 |---|---|
-| `edx update` | Incremental run (the "refresh" button) — default cron mode. |
-| `edx run --full-reload` | Re-process the last 3 years of publications. |
-| `edx config check [--format yaml\|json]` | Validate config and print all values with secrets masked. |
-| `edx --config-dir DIR ...` | Override the config directory (default `./config`). |
+| [`config/app.yaml`](config/app.yaml) | пути, расписание, knobs всех стадий (Discoverer, Downloader, Unpacker, Classifier, Text Extractor, Validator, Orchestrator, Google Drive) |
+| [`config/tickers.yaml`](config/tickers.yaml) | тикер MOEX → e-disclosure id, ИНН/ОГРН, опциональный priority_override |
+| [`config/metrics.yaml`](config/metrics.yaml) | каноническое имя, синонимы IFRS/РСБУ, единица, валюта, опциональная формула |
+| [`config/event_types.yaml`](config/event_types.yaml) | справочник кодов событий (обязательно содержит `other`) |
+| [`config/llm.yaml`](config/llm.yaml) | Claude Sonnet 4.6 как primary, OpenRouter как fallback, кеширование |
+| [`config/ocr.yaml`](config/ocr.yaml) | Tesseract `rus+eng` по умолчанию; cloud OCR — заглушки |
 
-## Configuration
+Любая ошибка валидации YAML → exit code 2 с структурированным логом
+`config_load_failed` (путь к файлу + поле).
 
-All settings live as YAML files under `config/` and are validated at startup
-by Pydantic. Re-read on every invocation — no caching. Secrets come from
-`.env` via `pydantic-settings`.
-
-| File | Schema | Purpose |
-|---|---|---|
-| `config/app.yaml` | `AppConfig` | Filesystem paths (ТЗ §10.1), cron schedule, default run mode, backfill depth, optional contact email used in the scraper User-Agent. |
-| `config/tickers.yaml` | `TickersConfig` | Issuer registry: MOEX ticker → e-disclosure ID, plus optional INN/OGRN and a per-issuer `priority_override` (`IFRS`/`RSBU`). |
-| `config/metrics.yaml` | `MetricsConfig` | Canonical metric names + per-standard synonyms + units/currency, plus optional derivation `formula`. Includes a top-level `reporting_priority` (`["IFRS","RSBU"]`). |
-| `config/event_types.yaml` | `EventTypesConfig` | Material-event taxonomy (codes + display names + aliases). Must contain a `code: other` fallback entry. |
-| `config/llm.yaml` | `LLMConfig` | Primary Anthropic provider + OpenRouter fallback, shared `max_tokens` / `temperature` / `request_timeout_s` / `max_retries` / `concurrency`. |
-| `config/ocr.yaml` | `OCRConfig` | OCR engine choice (`tesseract` / `yandex_vision` / `google_vision`), Tesseract languages and DPI, options for cloud engines. |
-| `.env` | `Secrets` | API keys and OAuth tokens. Keys: `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REFRESH_TOKEN`, `YANDEX_VISION_OCR_KEY`. |
-
-### Adding things
-
-- **New issuer** → append to `tickers.yaml`. No code changes.
-- **New metric** → append to `metrics.yaml` (with synonyms in both standards).
-  No code changes.
-- **New event type** → append to `event_types.yaml`. No code changes.
-
-### Validation behaviour
-
-Any extra (unknown) field, type mismatch, or invalid `reporting_priority`
-(non-`IFRS`/`RSBU`) value triggers a `ValidationError`. The CLI exits with code
-`2` and emits a structured `config_load_failed` log line carrying the offending
-file path and dotted field name.
-
-## Development
+## 5. Запуск
 
 ```bash
-make lint        # ruff
-make typecheck   # mypy strict
-make test        # pytest
+edx update                          # инкрементальный прогон (кнопка «обновить»)
+edx run --full-reload               # полная переобработка последних 3 лет
+edx run --ticker SBER --ticker GAZP # прогон только по выбранным тикерам
+edx status                          # последние 5 запусков с агрегатами
 ```
 
-See [`prompts/README.md`](prompts/README.md) for the implementation roadmap.
+Все стадии можно запустить изолированно для отладки:
+
+```bash
+edx discover [--ticker SBER]
+edx download [--publication-id ID]
+edx unpack [--publication-id ID]
+edx classify [--publication-id ID]
+edx extract-text [--publication-id ID]
+edx extract-metrics [--publication-id ID]
+edx extract-events [--publication-id ID]
+edx validate [--publication-id ID]
+edx export-excel
+edx replicate
+edx cache prune --older-than 30d
+```
+
+## 6. Расписание
+
+Шаблоны лежат в `deploy/`. Время `04:00` соответствует
+`config/app.yaml → schedule.cron_time`.
+
+### cron
+
+```bash
+crontab -u <user> /opt/edx/deploy/cron/edx.crontab
+```
+
+### systemd timer
+
+```bash
+sudo cp deploy/systemd/edx-update.service /etc/systemd/system/
+sudo cp deploy/systemd/edx-update.timer   /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now edx-update.timer
+```
+
+## 7. Где смотреть результат
+
+- `output/e-disclosure.xlsx` — Excel-витрина (4 листа: `metrics`, `events`,
+  `meta`, `qa_issues`).
+- Google Drive — тот же файл с тем же `file_id` и ссылкой между запусками
+  (см. `runs.excel_drive_link`). `edx status` печатает ссылку.
+- Опциональные снапшоты с датой в подпапке `archive/` — флаг
+  `google_drive.archive: true` в `app.yaml`.
+
+## 8. Логи и отладка
+
+- `logs/pipeline.log` — JSON-лог через `structlog`, ротация 10 МБ × 5
+  файлов; уровень переключается переменной окружения `EDX_LOG_LEVEL`.
+- `data/state.sqlite` — открывается любым SQLite-вьювером (DBeaver,
+  `sqlite3`, `litecli`). Таблицы: `tickers`, `publications`, `documents`,
+  `metrics`, `events`, `runs`, `qa_issues`, `schema_migrations`.
+- `edx status [--limit N]` — табличный обзор последних запусков.
+- LLM-кеш: `data/processed/_llm_cache/{sha256}.json`. Чистится через
+  `edx cache prune --older-than 30d`.
+
+## 9. Расширение
+
+| Хочу добавить | Где | Перезапуск кода |
+|---|---|---|
+| Эмитента | `config/tickers.yaml` (`ticker`, `e_disclosure_id`, `name`) | нет |
+| Финансовый показатель | `config/metrics.yaml` (`canonical_name`, синонимы, формула) | нет |
+| Тип существенного факта | `config/event_types.yaml` (`code`, `display_name`, `aliases`) | нет |
+| Сменить стандарт-приоритет | `config/metrics.yaml → reporting_priority` | нет |
+| Подключить cloud-OCR | `config/ocr.yaml → engine: yandex_vision`, плюс заполнить ключи | да (нужно реализовать заглушку) |
+
+## 10. Что НЕ входит в scope первой версии
+
+Согласовано с заказчиком (раздел 18 ТЗ):
+
+- Telegram / email уведомления.
+- Мобильное приложение iOS.
+- REST API.
+- Динамическое подтягивание состава индекса MOEX.
+- Извлечение нефинансовых показателей (ESG, операционные метрики).
+- Дашборды и визуализация — только Excel-витрина.
+- Алёрты по триггерам (например, «EBITDA −30% YoY»).
+- Хранение исторических версий извлечений (только последняя успешная по
+  публикации).
+
+## 11. Перспективы
+
+Архитектурно зафиксировано (раздел 15 ТЗ):
+
+- Бизнес-логика отделена от способа запуска — над ядром можно поднять
+  FastAPI без рефакторинга.
+- State + витрина — в стандартных форматах (SQLite, Excel), читаются
+  мобильными клиентами сторонними средствами уже сейчас.
+- Нативное iOS-приложение — отдельным ТЗ позже.
+
+---
+
+## Разработка
+
+```bash
+make install         # установить пакет + dev зависимости
+make lint            # ruff
+make typecheck       # mypy strict
+make test            # pytest (юнит + e2e)
+pytest tests/e2e -q  # отдельно — приёмочные сценарии
+```
+
+Стек:
+- `httpx` async + `aiolimiter` для polite scraping
+- `selectolax` для HTML, `pymupdf` + `pdfplumber` для PDF, `pytesseract` +
+  `pdf2image` для OCR
+- `anthropic` (приоритет) + OpenRouter HTTP (fallback) с `tenacity`-ретраями
+  и `json-repair` для устойчивого парсинга
+- `openpyxl` для Excel-витрины, `google-api-python-client` для Drive
+- `pydantic` 2 + `pydantic-settings` для конфигов и секретов
+- `structlog` для JSON-логов, чистая `sqlite3` для state-БД, `pytest`
+  + `pytest-asyncio` для тестов
+
+Архитектура и порядок реализации описаны в [`prompts/README.md`](prompts/README.md).
+
+## Статус реализации
+
+Все 15 этапов завершены — ТЗ закрыто полностью.
+
+| # | Этап |
+|---|---|
+| 01 | каркас проекта |
+| 02 | конфигурация и секреты |
+| 03 | SQLite state-БД + репозитории |
+| 04 | HTTP-клиент + Discoverer |
+| 05 | Downloader + Unpacker |
+| 06 | PDF Classifier |
+| 07 | Text Extractor (native + OCR) |
+| 08 | LLM-провайдер (Anthropic + OpenRouter fallback) |
+| 09 | Metric Extractor |
+| 10 | Event Extractor |
+| 11 | Validator (sanity checks + qa_issues) |
+| 12 | Writer (SQLite mart + Excel) |
+| 13 | Google Drive репликация |
+| 14 | Оркестратор + единый CLI |
+| 15 | Расписание, документация, e2e-тесты |

@@ -26,6 +26,7 @@ from edx.storage import (
     MetricsRepo,
     PublicationRow,
     PublicationsRepo,
+    QAIssuesRepo,
     RunsRepo,
 )
 from edx.storage.models import PublicationStatus
@@ -79,6 +80,7 @@ class Orchestrator:
         publications_repo: PublicationsRepo,
         metrics_repo: MetricsRepo,
         events_repo: EventsRepo,
+        qa_issues_repo: QAIssuesRepo,
         stages: StageBundle,
         ticker_entries: list[TickerEntry],
         excel_path: Path,
@@ -89,6 +91,7 @@ class Orchestrator:
         self.publications_repo = publications_repo
         self.metrics_repo = metrics_repo
         self.events_repo = events_repo
+        self.qa_issues_repo = qa_issues_repo
         self.stages = stages
         self.ticker_entries = ticker_entries
         self.excel_path = excel_path
@@ -164,8 +167,10 @@ class Orchestrator:
                 )
                 stage_errors.append(f"replicator: {exc}")
 
-        # Promote partial when at least one publication ended in 'failed'.
+        # Promote partial when at least one publication ended in 'failed' and
+        # surface those failures into qa_issues for the QA report (ТЗ §11).
         publications_after = self.publications_repo.list_all()
+        self._record_failure_issues(publications_after)
         by_status = self._count_by_status(publications_after)
         if final_status == "succeeded" and by_status.get("failed", 0) > 0:
             final_status = "partial"
@@ -355,6 +360,22 @@ class Orchestrator:
     def _backfill_cutoff(self) -> str:
         today = datetime.now(UTC).date()
         return (today - timedelta(days=365 * self.backfill_years)).isoformat()
+
+    def _record_failure_issues(
+        self, publications: list[PublicationRow]
+    ) -> None:
+        """Surface every ``failed`` publication as a ``publication_failed``
+        qa_issue so downstream Excel/QA reports include them.
+        """
+        for pub in publications:
+            if pub.status != "failed":
+                continue
+            message = pub.last_error or "publication failed (no detail recorded)"
+            self.qa_issues_repo.replace_for_publication(
+                pub.publication_id,
+                pub.ticker,
+                [("publication_failed", message)],
+            )
 
     def _count_by_status(
         self, publications: Iterable[PublicationRow]
