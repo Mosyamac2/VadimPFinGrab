@@ -61,9 +61,15 @@ class DownloadResult:
 def build_user_agent(settings: AppSettings) -> str:
     """Build a ``User-Agent`` header from app settings.
 
-    Embeds the contact email (if configured) so the operator of e-disclosure.ru
-    can reach out before blocking us.
+    Resolution order:
+    1. ``app.discoverer.user_agent`` if set — verbatim override (e.g. when a
+       site's anti-bot rules block obvious bot UAs and you need a browser one).
+    2. Otherwise ``edx/<version> (+e-disclosure-extractor)``, with optional
+       ``contact=<email>`` appended when ``app.contact_email`` is set.
     """
+    override = settings.app.discoverer.user_agent
+    if override:
+        return override
     base = f"edx/{__version__} (+e-disclosure-extractor)"
     contact = settings.app.contact_email
     if contact:

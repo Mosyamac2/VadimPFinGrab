@@ -54,6 +54,11 @@ class DiscovererConfig(BaseModel):
     retry_min_wait_s: float = Field(default=0.5, ge=0)
     retry_max_wait_s: float = Field(default=10.0, gt=0)
     respect_robots: bool = True
+    # Override the User-Agent header the scraper sends. When None (default)
+    # the client sends ``edx/<version> (+e-disclosure-extractor)``. Some
+    # sites' anti-bot rules block obvious bot UAs — set this to a real
+    # browser string to bypass that.
+    user_agent: str | None = None
 
 
 class DownloaderConfig(BaseModel):

@@ -30,6 +30,10 @@ discoverer:
   # When false, robots.txt is ignored. Set to false only if you have written
   # permission from the source. The pipeline will log a WARNING on startup.
   respect_robots: true
+  # If the site's anti-bot rules return 403 to the default UA, override with
+  # a real browser string here. Leave null to keep the polite default.
+  # user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+  user_agent: null
 
 downloader:
   # Number of publications downloaded in parallel.
