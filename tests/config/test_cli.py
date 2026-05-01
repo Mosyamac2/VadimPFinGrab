@@ -30,23 +30,38 @@ def _run_cli(
     )
 
 
+def _events(stdout: str) -> list[dict[str, object]]:
+    return [
+        json.loads(line)
+        for line in stdout.strip().splitlines()
+        if line.startswith("{")
+    ]
+
+
+def _find_event(stdout: str, name: str) -> dict[str, object]:
+    for evt in _events(stdout):
+        if evt.get("event") == name:
+            return evt
+    raise AssertionError(f"event {name!r} not found in stdout: {stdout!r}")
+
+
 def test_cli_update_succeeds_with_reference_config() -> None:
     result = _run_cli(["update"])
     assert result.returncode == 0, result.stderr
-    # structlog writes JSON to stdout
-    last_line = result.stdout.strip().splitlines()[-1]
-    parsed = json.loads(last_line)
-    assert parsed["event"] == "cli_command_invoked"
-    assert parsed["command"] == "update"
-    assert parsed["ticker_count"] == 3
+    invoked = _find_event(result.stdout, "cli_command_invoked")
+    assert invoked["command"] == "update"
+    assert invoked["ticker_count"] == 3
+    finished = _find_event(result.stdout, "run_finished")
+    assert finished["status"] == "succeeded"
 
 
 def test_cli_run_full_reload_succeeds() -> None:
     result = _run_cli(["run", "--full-reload"])
     assert result.returncode == 0, result.stderr
-    last_line = result.stdout.strip().splitlines()[-1]
-    parsed = json.loads(last_line)
-    assert parsed["full_reload"] is True
+    invoked = _find_event(result.stdout, "cli_command_invoked")
+    assert invoked["command"] == "full_reload"
+    finished = _find_event(result.stdout, "run_finished")
+    assert finished["status"] == "succeeded"
 
 
 def test_cli_returns_exit_code_2_on_extra_field(tmp_path: Path) -> None:
@@ -61,10 +76,8 @@ def test_cli_returns_exit_code_2_on_extra_field(tmp_path: Path) -> None:
 
     result = _run_cli(["--config-dir", str(cfg_dir), "update"])
     assert result.returncode == 2
-    last_line = result.stdout.strip().splitlines()[-1]
-    parsed = json.loads(last_line)
-    assert parsed["event"] == "config_load_failed"
-    assert parsed["file"].endswith("metrics.yaml")
+    parsed = _find_event(result.stdout, "config_load_failed")
+    assert isinstance(parsed["file"], str) and parsed["file"].endswith("metrics.yaml")
     assert "extra_unknown_field" in (parsed.get("field") or "")
 
 

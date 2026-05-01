@@ -1,8 +1,9 @@
 """Command-line entry point for the e-disclosure extractor.
 
-Stage scaffolding: real pipeline stages land in subsequent prompts. The CLI
-currently parses arguments, loads + validates configuration, and emits a
-structured log line for each invocation.
+The pipeline stages themselves land in subsequent prompts. The CLI is
+responsible for parsing arguments, loading + validating configuration,
+preparing the state database (migrations + ticker sync), recording a row in
+the ``runs`` journal, and dispatching to the eventual orchestrator.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections.abc import Sequence
+from contextlib import closing
 from pathlib import Path
 
 import yaml
@@ -17,9 +19,12 @@ import yaml
 from edx import __version__
 from edx.config import AppSettings, ConfigLoadError, load_all
 from edx.logging_setup import configure, get_logger
+from edx.storage import Database, RunsRepo, TickersRepo
+from edx.storage.models import RunMode
 
 EXIT_OK = 0
 EXIT_CONFIG_ERROR = 2
+EXIT_RUNTIME_ERROR = 3
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -82,7 +87,6 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _load_settings_or_exit(args: argparse.Namespace) -> AppSettings | int:
-    """Load and validate config; on failure log and return ``EXIT_CONFIG_ERROR``."""
     log = get_logger("edx.cli")
     try:
         return load_all(args.config_dir)
@@ -96,31 +100,68 @@ def _load_settings_or_exit(args: argparse.Namespace) -> AppSettings | int:
         return EXIT_CONFIG_ERROR
 
 
-def _cmd_update(args: argparse.Namespace) -> int:
+def _execute_pipeline_run(settings: AppSettings, mode: RunMode) -> int:
+    """Run the (currently empty) pipeline scaffolding for the given mode.
+
+    Real stages plug in here in subsequent prompts. For now: migrate the
+    state database, sync tickers from YAML, open + close a row in ``runs``.
+    """
     log = get_logger("edx.cli")
+    db = Database(settings.app.paths.state_db)
+    applied_versions = db.migrate()
+
+    with closing(db.connect()) as conn:
+        tickers_repo = TickersRepo(db, conn)
+        runs_repo = RunsRepo(db, conn)
+
+        ticker_count = tickers_repo.upsert_from_config(settings.tickers.tickers)
+        log.info(
+            "tickers_synced",
+            ticker_count=ticker_count,
+            applied_migrations=applied_versions,
+        )
+
+        run_id = runs_repo.start_run(mode)
+        log.info(
+            "cli_command_invoked",
+            command=mode,
+            run_id=run_id,
+            ticker_count=ticker_count,
+        )
+
+        try:
+            stats = {
+                "ticker_count": ticker_count,
+                "migrations_applied": applied_versions,
+                "publications_total": 0,
+            }
+            runs_repo.finish_run(run_id, status="succeeded", stats=stats)
+            log.info("run_finished", run_id=run_id, status="succeeded")
+        except Exception as exc:
+            runs_repo.finish_run(
+                run_id,
+                status="failed",
+                error_summary=f"{type(exc).__name__}: {exc}",
+            )
+            log.error("run_finished", run_id=run_id, status="failed", error=str(exc))
+            return EXIT_RUNTIME_ERROR
+
+    return EXIT_OK
+
+
+def _cmd_update(args: argparse.Namespace) -> int:
     settings_or_code = _load_settings_or_exit(args)
     if isinstance(settings_or_code, int):
         return settings_or_code
-    log.info(
-        "cli_command_invoked",
-        command="update",
-        ticker_count=len(settings_or_code.tickers.tickers),
-    )
-    return EXIT_OK
+    return _execute_pipeline_run(settings_or_code, mode="update")
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    log = get_logger("edx.cli")
     settings_or_code = _load_settings_or_exit(args)
     if isinstance(settings_or_code, int):
         return settings_or_code
-    log.info(
-        "cli_command_invoked",
-        command="run",
-        full_reload=bool(args.full_reload),
-        ticker_count=len(settings_or_code.tickers.tickers),
-    )
-    return EXIT_OK
+    mode: RunMode = "full_reload" if args.full_reload else "update"
+    return _execute_pipeline_run(settings_or_code, mode=mode)
 
 
 def _cmd_config_check(args: argparse.Namespace) -> int:
