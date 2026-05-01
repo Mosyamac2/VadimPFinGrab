@@ -87,6 +87,7 @@ class DocumentRow:
     is_machine_readable: int | None
     page_count: int | None
     file_hash: str
+    is_primary_for_period: int = 0
 
 
 @dataclass(frozen=True)

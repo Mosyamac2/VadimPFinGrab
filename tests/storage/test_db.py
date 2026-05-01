@@ -37,7 +37,8 @@ def test_migrate_idempotent(tmp_path: Path) -> None:
     db = Database(tmp_path / "state.sqlite")
     first = db.migrate()
     second = db.migrate()
-    assert first == ["0001_init"]
+    assert first[0] == "0001_init"
+    assert "0002_classifier" in first
     assert second == []
 
 

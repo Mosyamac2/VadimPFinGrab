@@ -21,6 +21,7 @@ from edx import __version__
 from edx.config import AppSettings, ConfigLoadError, load_all
 from edx.http.client import EDisclosureClient, build_user_agent
 from edx.logging_setup import configure, get_logger
+from edx.stages.classifier import build_classifier_service
 from edx.stages.discoverer import build_discoverer_service
 from edx.stages.discoverer.service import compute_since
 from edx.stages.downloader import build_downloader_service
@@ -130,6 +131,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Restrict unpacking to specific publication IDs (repeatable).",
     )
     unpack_p.set_defaults(func=_cmd_unpack)
+
+    classify_p = subparsers.add_parser(
+        "classify",
+        help="Classify unpacked PDFs (reporting standard, form, machine-readability).",
+    )
+    classify_p.add_argument(
+        "--publication-id",
+        action="append",
+        help="Restrict classification to specific publication IDs (repeatable).",
+    )
+    classify_p.set_defaults(func=_cmd_classify)
 
     return parser
 
@@ -348,6 +360,40 @@ def _cmd_unpack(args: argparse.Namespace) -> int:
             publications=len(targets),
             archives_extracted=sum(o.archives_extracted for o in outcomes),
             documents_added=sum(o.documents_added for o in outcomes),
+        )
+    return EXIT_OK
+
+
+def _cmd_classify(args: argparse.Namespace) -> int:
+    log = get_logger("edx.cli")
+    settings_or_code = _load_settings_or_exit(args)
+    if isinstance(settings_or_code, int):
+        return settings_or_code
+    settings = settings_or_code
+
+    db = Database(settings.app.paths.state_db)
+    db.migrate()
+    with closing(db.connect()) as conn:
+        publications_repo = PublicationsRepo(db, conn)
+        documents_repo = DocumentsRepo(db, conn)
+        targets = _select_publications(
+            publications_repo,
+            status="unpacked",
+            publication_ids=args.publication_id,
+        )
+        if not targets:
+            log.info("classify_no_pending_publications")
+            return EXIT_OK
+        service = build_classifier_service(
+            settings, publications_repo, documents_repo
+        )
+        outcomes = service.run(targets)
+        log.info(
+            "classify_finished",
+            publications=len(targets),
+            classified=len(outcomes),
+            machine_readable=sum(o.machine_readable_count for o in outcomes),
+            scans=sum(o.scan_count for o in outcomes),
         )
     return EXIT_OK
 

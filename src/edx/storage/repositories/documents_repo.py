@@ -87,4 +87,5 @@ def _row_to_document(row: sqlite3.Row) -> DocumentRow:
         is_machine_readable=row["is_machine_readable"],
         page_count=row["page_count"],
         file_hash=row["file_hash"],
+        is_primary_for_period=row["is_primary_for_period"],
     )

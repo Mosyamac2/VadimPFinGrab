@@ -74,6 +74,18 @@ class UnpackerConfig(BaseModel):
     max_unpacked_mb: int = Field(default=500, ge=1)
 
 
+class ClassifierConfig(BaseModel):
+    """PDF Classifier knobs (ТЗ §7.1 п.4)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Minimum total characters across the first inspected pages required for a
+    # PDF to be considered machine-readable. Below this, we treat it as a scan.
+    min_text_chars: int = Field(default=400, ge=1)
+    # Number of pages from the beginning of the PDF to sample.
+    first_pages_to_inspect: int = Field(default=3, ge=1, le=20)
+
+
 class AppConfig(BaseModel):
     """Top-level ``app.yaml``."""
 
@@ -85,4 +97,5 @@ class AppConfig(BaseModel):
     discoverer: DiscovererConfig = Field(default_factory=DiscovererConfig)
     downloader: DownloaderConfig = Field(default_factory=DownloaderConfig)
     unpacker: UnpackerConfig = Field(default_factory=UnpackerConfig)
+    classifier: ClassifierConfig = Field(default_factory=ClassifierConfig)
     contact_email: str | None = None

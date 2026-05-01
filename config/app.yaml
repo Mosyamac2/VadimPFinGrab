@@ -45,6 +45,12 @@ unpacker:
   # ZIP/RAR contents that would exceed this cap fail the publication.
   max_unpacked_mb: 500
 
+classifier:
+  # PDFs whose first N pages contain fewer than this many characters of text
+  # are treated as scans and routed to OCR by the Text Extractor.
+  min_text_chars: 400
+  first_pages_to_inspect: 3
+
 # Optional contact email — embedded into the User-Agent header used for
 # scraping e-disclosure.ru. Leave empty if you do not want to expose it.
 contact_email: null
