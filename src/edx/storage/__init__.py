@@ -9,6 +9,7 @@ from edx.storage.models import (
     MetricInput,
     MetricRow,
     PublicationRow,
+    QAIssueRow,
     RunRow,
     TickerRow,
 )
@@ -17,6 +18,7 @@ from edx.storage.repositories import (
     EventsRepo,
     MetricsRepo,
     PublicationsRepo,
+    QAIssuesRepo,
     RunsRepo,
     TickersRepo,
 )
@@ -34,6 +36,8 @@ __all__ = [
     "MetricsRepo",
     "PublicationRow",
     "PublicationsRepo",
+    "QAIssueRow",
+    "QAIssuesRepo",
     "RunRow",
     "RunsRepo",
     "TickerRow",

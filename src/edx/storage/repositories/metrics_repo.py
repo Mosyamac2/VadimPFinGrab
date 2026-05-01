@@ -73,6 +73,23 @@ class MetricsRepo:
         )
         return [_row_to_metric(row) for row in cursor]
 
+    def list_for_ticker(self, ticker: str) -> list[MetricRow]:
+        cursor = self.conn.execute(
+            "SELECT * FROM metrics WHERE ticker = ? "
+            "ORDER BY reporting_date, period_type, metric_name",
+            (ticker,),
+        )
+        return [_row_to_metric(row) for row in cursor]
+
+    def update_qa_warning(
+        self, metric_id: int, qa_warning: str | None
+    ) -> None:
+        with self.db.transaction(self.conn):
+            self.conn.execute(
+                "UPDATE metrics SET qa_warning = ? WHERE metric_id = ?",
+                (qa_warning, metric_id),
+            )
+
 
 def _row_to_metric(row: sqlite3.Row) -> MetricRow:
     return MetricRow(

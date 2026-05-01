@@ -32,12 +32,14 @@ from edx.stages.event_extractor import build_event_extractor_service
 from edx.stages.metric_extractor import build_metric_extractor_service
 from edx.stages.text_extractor import build_text_extractor_service
 from edx.stages.unpacker import build_unpacker_service
+from edx.stages.validator import build_validator_service
 from edx.storage import (
     Database,
     DocumentsRepo,
     EventsRepo,
     MetricsRepo,
     PublicationsRepo,
+    QAIssuesRepo,
     RunsRepo,
     TickersRepo,
 )
@@ -183,6 +185,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Restrict extraction to specific publication IDs (repeatable).",
     )
     extract_events_p.set_defaults(func=_cmd_extract_events)
+
+    validate_p = subparsers.add_parser(
+        "validate",
+        help="Run sanity checks over extracted metrics; produce qa_issues report.",
+    )
+    validate_p.add_argument(
+        "--publication-id",
+        action="append",
+        help="Restrict validation to specific publication IDs (repeatable).",
+    )
+    validate_p.set_defaults(func=_cmd_validate)
 
     cache_p = subparsers.add_parser(
         "cache",
@@ -618,6 +631,42 @@ def _cmd_extract_events(args: argparse.Namespace) -> int:
             return EXIT_OK
 
         return asyncio.run(_run())
+
+
+def _cmd_validate(args: argparse.Namespace) -> int:
+    log = get_logger("edx.cli")
+    settings_or_code = _load_settings_or_exit(args)
+    if isinstance(settings_or_code, int):
+        return settings_or_code
+    settings = settings_or_code
+
+    db = Database(settings.app.paths.state_db)
+    db.migrate()
+    with closing(db.connect()) as conn:
+        publications_repo = PublicationsRepo(db, conn)
+        metrics_repo = MetricsRepo(db, conn)
+        qa_issues_repo = QAIssuesRepo(db, conn)
+        targets = _select_publications(
+            publications_repo,
+            status="extracted",
+            publication_ids=args.publication_id,
+        )
+        report_targets = [p for p in targets if p.publication_type == "report"]
+        if not report_targets:
+            log.info("validate_no_pending_publications")
+            return EXIT_OK
+        service = build_validator_service(
+            settings, publications_repo, metrics_repo, qa_issues_repo
+        )
+        outcomes = service.run(report_targets)
+        log.info(
+            "validate_finished",
+            publications=len(report_targets),
+            processed=len(outcomes),
+            warnings_total=sum(o.warnings_count for o in outcomes),
+            incomplete=sum(1 for o in outcomes if o.is_incomplete),
+        )
+    return EXIT_OK
 
 
 def _cmd_cache_prune(args: argparse.Namespace) -> int:

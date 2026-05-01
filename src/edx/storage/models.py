@@ -157,3 +157,13 @@ class RunRow:
     mode: RunMode
     stats_json: str | None
     error_summary: str | None
+
+
+@dataclass(frozen=True)
+class QAIssueRow:
+    issue_id: int
+    publication_id: str
+    ticker: str
+    code: str
+    message: str
+    created_at: str

@@ -21,7 +21,8 @@ implementation is decomposed into 15 sequential prompts in
 - ✅ Prompt 08 — LLM provider chain (Anthropic + OpenRouter fallback)
 - ✅ Prompt 09 — Metric Extractor (LLM)
 - ✅ Prompt 10 — Event Extractor (LLM)
-- ⬜ Prompts 11–15 — pending
+- ✅ Prompt 11 — Validator (sanity checks + qa_issues)
+- ⬜ Prompts 12–15 — pending
 
 ## System packages
 
