@@ -73,6 +73,34 @@ class MetricsRepo:
         )
         return [_row_to_metric(row) for row in cursor]
 
+    def list_all_for_export(self) -> list[dict[str, object]]:
+        """Return one dict per metric row, joined to its publication's source URL.
+
+        Used by the Writer stage to build the Excel mart. Sorted for stable
+        deterministic output.
+        """
+        cursor = self.conn.execute(
+            """
+            SELECT
+                m.metric_id              AS metric_id,
+                m.ticker                 AS ticker,
+                m.reporting_date         AS reporting_date,
+                m.period_type            AS period_type,
+                m.reporting_standard     AS reporting_standard,
+                m.metric_name            AS metric_name,
+                m.value                  AS value,
+                m.currency               AS currency,
+                m.unit                   AS unit,
+                m.qa_warning             AS qa_warning,
+                p.source_url             AS source_publication_url
+            FROM metrics m
+            JOIN documents d ON d.document_id = m.source_document_id
+            JOIN publications p ON p.publication_id = d.publication_id
+            ORDER BY m.ticker, m.reporting_date, m.period_type, m.metric_name
+            """
+        )
+        return [dict(row) for row in cursor]
+
     def list_for_ticker(self, ticker: str) -> list[MetricRow]:
         cursor = self.conn.execute(
             "SELECT * FROM metrics WHERE ticker = ? "

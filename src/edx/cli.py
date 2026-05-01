@@ -33,6 +33,7 @@ from edx.stages.metric_extractor import build_metric_extractor_service
 from edx.stages.text_extractor import build_text_extractor_service
 from edx.stages.unpacker import build_unpacker_service
 from edx.stages.validator import build_validator_service
+from edx.stages.writer import build_writer_service
 from edx.storage import (
     Database,
     DocumentsRepo,
@@ -196,6 +197,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Restrict validation to specific publication IDs (repeatable).",
     )
     validate_p.set_defaults(func=_cmd_validate)
+
+    export_p = subparsers.add_parser(
+        "export-excel",
+        help="Generate the Excel mart from state.sqlite (full snapshot).",
+    )
+    export_p.set_defaults(func=_cmd_export_excel)
 
     cache_p = subparsers.add_parser(
         "cache",
@@ -666,6 +673,29 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             warnings_total=sum(o.warnings_count for o in outcomes),
             incomplete=sum(1 for o in outcomes if o.is_incomplete),
         )
+    return EXIT_OK
+
+
+def _cmd_export_excel(args: argparse.Namespace) -> int:
+    log = get_logger("edx.cli")
+    settings_or_code = _load_settings_or_exit(args)
+    if isinstance(settings_or_code, int):
+        return settings_or_code
+    settings = settings_or_code
+
+    db = Database(settings.app.paths.state_db)
+    db.migrate()
+    with closing(db.connect()) as conn:
+        service = build_writer_service(
+            settings,
+            PublicationsRepo(db, conn),
+            MetricsRepo(db, conn),
+            EventsRepo(db, conn),
+            QAIssuesRepo(db, conn),
+            TickersRepo(db, conn),
+        )
+        path = service.run()
+        log.info("export_excel_finished", path=str(path))
     return EXIT_OK
 
 

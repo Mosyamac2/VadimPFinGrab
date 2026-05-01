@@ -45,6 +45,13 @@ class EventsRepo:
                 ),
             )
 
+    def list_all_for_export(self) -> list[EventRow]:
+        """All events sorted by ``event_date`` desc for the Excel mart."""
+        cursor = self.conn.execute(
+            "SELECT * FROM events ORDER BY event_date DESC, event_id"
+        )
+        return [_row_to_event(row) for row in cursor]
+
     def get_by_publication(self, publication_id: str) -> EventRow | None:
         cursor = self.conn.execute(
             "SELECT * FROM events WHERE source_publication_id = ?",

@@ -36,6 +36,7 @@ dependencies = [
     "pdf2image>=1.17",
     "anthropic>=0.39",
     "json-repair>=0.30",
+    "openpyxl>=3.1",
 ]
 
 [project.optional-dependencies]
@@ -86,7 +87,7 @@ explicit_package_bases = true
 namespace_packages = true
 
 [[tool.mypy.overrides]]
-module = ["structlog.*", "selectolax.*", "aiolimiter.*", "rarfile.*", "pymupdf.*", "fitz.*", "pdfplumber.*", "pytesseract.*", "PIL.*", "pdf2image.*", "json_repair.*"]
+module = ["structlog.*", "selectolax.*", "aiolimiter.*", "rarfile.*", "pymupdf.*", "fitz.*", "pdfplumber.*", "pytesseract.*", "PIL.*", "pdf2image.*", "json_repair.*", "openpyxl.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
