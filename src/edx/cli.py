@@ -332,6 +332,7 @@ def _execute_pipeline_run(
                 retry_min_wait_s=settings.app.discoverer.retry_min_wait_s,
                 retry_max_wait_s=settings.app.discoverer.retry_max_wait_s,
                 respect_robots=settings.app.discoverer.respect_robots,
+                cookies=settings.app.discoverer.cookies or None,
             ) as http_client:
                 from edx.stages.discoverer import build_discoverer_service
 
@@ -558,6 +559,7 @@ def _cmd_download(args: argparse.Namespace) -> int:
                 retry_min_wait_s=settings.app.discoverer.retry_min_wait_s,
                 retry_max_wait_s=settings.app.discoverer.retry_max_wait_s,
                 respect_robots=settings.app.discoverer.respect_robots,
+                cookies=settings.app.discoverer.cookies or None,
             ) as client:
                 service = build_downloader_service(
                     settings, publications_repo, client=client

@@ -34,6 +34,15 @@ discoverer:
   # a real browser string here. Leave null to keep the polite default.
   # user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
   user_agent: null
+  # Session cookies for sites behind a JavaScript anti-bot challenge
+  # (ServicePipe, Cloudflare, etc.). Solve the challenge once in your
+  # laptop browser, open devtools → Application → Cookies → www.e-disclosure.ru,
+  # copy values into the dict below. Refresh manually when they expire.
+  cookies: {}
+  # Example with ServicePipe cookies:
+  # cookies:
+  #   spsn: "1777660057657_"
+  #   spid: "1777660057657_bcd3ce8ab3fb4d44f95d6b20e4184f4e_4u1a2wa0rpuqir7k"
 
 downloader:
   # Number of publications downloaded in parallel.

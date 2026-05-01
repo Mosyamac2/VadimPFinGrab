@@ -26,6 +26,7 @@ def build_edisclosure_client(
         retry_max_wait_s=cfg.retry_max_wait_s,
         respect_robots=cfg.respect_robots,
         transport=transport,
+        cookies=cfg.cookies or None,
     )
 
 

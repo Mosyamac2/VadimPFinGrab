@@ -59,6 +59,12 @@ class DiscovererConfig(BaseModel):
     # sites' anti-bot rules block obvious bot UAs — set this to a real
     # browser string to bypass that.
     user_agent: str | None = None
+    # Session cookies to send with every request. Useful for sites behind a
+    # JavaScript anti-bot challenge (ServicePipe, Cloudflare, etc.): solve
+    # the challenge once in a real browser, copy values from
+    # devtools (Application → Cookies), paste here. Cookies expire and need
+    # manual refresh; for a permanent fix use a headless-browser scraper.
+    cookies: dict[str, str] = Field(default_factory=dict)
 
 
 class DownloaderConfig(BaseModel):

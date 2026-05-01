@@ -98,6 +98,7 @@ class EDisclosureClient:
         retry_max_wait_s: float = 10.0,
         respect_robots: bool = True,
         transport: httpx.AsyncBaseTransport | None = None,
+        cookies: dict[str, str] | None = None,
     ) -> None:
         if requests_per_second <= 0:
             raise ValueError("requests_per_second must be > 0")
@@ -110,6 +111,7 @@ class EDisclosureClient:
         self._client = httpx.AsyncClient(
             base_url=base_url,
             headers={"User-Agent": user_agent},
+            cookies=cookies or {},
             timeout=request_timeout_s,
             transport=transport,
             follow_redirects=True,
