@@ -16,7 +16,9 @@ implementation is decomposed into 15 sequential prompts in
 - ✅ Prompt 03 — SQLite state DB + repositories
 - ✅ Prompt 04 — HTTP client + Discoverer stage
 - ✅ Prompt 05 — Downloader + Unpacker stages
-- ⬜ Prompts 06–15 — pending
+- ✅ Prompt 06 — PDF Classifier stage
+- ✅ Prompt 07 — Text Extractor (native + OCR)
+- ⬜ Prompts 08–15 — pending
 
 ## System packages
 
@@ -25,10 +27,15 @@ The pipeline needs a few system-level tools beyond Python wheels:
 ```bash
 # Required to extract RAR archives produced by some issuers' submissions.
 sudo apt install unrar
+# Required to OCR scanned PDFs (Tesseract + Russian/English language packs +
+# poppler-utils for the pdf2image bridge).
+sudo apt install tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng poppler-utils
 ```
 
 Without `unrar`, RAR-archived publications are skipped with a warning; ZIP
-archives still work.
+archives still work. Without Tesseract / poppler, scanned PDFs cannot be OCR'd
+and the publication is marked failed at the Text Extractor stage; native
+machine-readable PDFs still process.
 
 ## Quick start
 

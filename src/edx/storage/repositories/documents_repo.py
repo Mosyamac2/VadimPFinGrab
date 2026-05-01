@@ -68,6 +68,15 @@ class DocumentsRepo:
                 ),
             )
 
+    def set_text_extract_path(
+        self, document_id: int, relative_path: str
+    ) -> None:
+        with self.db.transaction(self.conn):
+            self.conn.execute(
+                "UPDATE documents SET text_extract_path = ? WHERE document_id = ?",
+                (relative_path, document_id),
+            )
+
     def list_for_publication(self, publication_id: str) -> list[DocumentRow]:
         cursor = self.conn.execute(
             "SELECT * FROM documents WHERE publication_id = ? ORDER BY document_id",
@@ -88,4 +97,5 @@ def _row_to_document(row: sqlite3.Row) -> DocumentRow:
         page_count=row["page_count"],
         file_hash=row["file_hash"],
         is_primary_for_period=row["is_primary_for_period"],
+        text_extract_path=row["text_extract_path"],
     )

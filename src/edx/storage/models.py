@@ -88,6 +88,7 @@ class DocumentRow:
     page_count: int | None
     file_hash: str
     is_primary_for_period: int = 0
+    text_extract_path: str | None = None
 
 
 @dataclass(frozen=True)

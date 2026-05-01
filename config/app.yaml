@@ -51,6 +51,16 @@ classifier:
   min_text_chars: 400
   first_pages_to_inspect: 3
 
+text_extractor:
+  # Hard cap on extracted text length per document; longer outputs are
+  # truncated with a warning. The LLM stage chunks separately on top of this.
+  max_chars: 400000
+  # Pull tables from native PDFs via pdfplumber as an extra signal for the LLM.
+  extract_tables: true
+  # Lines that recur on at least this many pages (case-sensitive after
+  # normalisation) are stripped as headers/footers.
+  header_footer_min_pages: 3
+
 # Optional contact email — embedded into the User-Agent header used for
 # scraping e-disclosure.ru. Leave empty if you do not want to expose it.
 contact_email: null

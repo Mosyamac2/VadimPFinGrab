@@ -86,6 +86,20 @@ class ClassifierConfig(BaseModel):
     first_pages_to_inspect: int = Field(default=3, ge=1, le=20)
 
 
+class TextExtractorConfig(BaseModel):
+    """Text Extractor stage knobs (ТЗ §7.1 п.5)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Hard cap on total characters per document. Anything above is truncated
+    # with a structured warning; the LLM stage handles its own chunking.
+    max_chars: int = Field(default=400_000, ge=1)
+    extract_tables: bool = True
+    # Header/footer recurrence detector: a line must appear on at least this
+    # many pages to be eligible for stripping.
+    header_footer_min_pages: int = Field(default=3, ge=2)
+
+
 class AppConfig(BaseModel):
     """Top-level ``app.yaml``."""
 
@@ -98,4 +112,5 @@ class AppConfig(BaseModel):
     downloader: DownloaderConfig = Field(default_factory=DownloaderConfig)
     unpacker: UnpackerConfig = Field(default_factory=UnpackerConfig)
     classifier: ClassifierConfig = Field(default_factory=ClassifierConfig)
+    text_extractor: TextExtractorConfig = Field(default_factory=TextExtractorConfig)
     contact_email: str | None = None

@@ -30,6 +30,10 @@ dependencies = [
     "aiolimiter>=1.1",
     "rarfile>=4.2",
     "pymupdf>=1.24",
+    "pdfplumber>=0.11",
+    "pytesseract>=0.3.10",
+    "Pillow>=10.0",
+    "pdf2image>=1.17",
 ]
 
 [project.optional-dependencies]
@@ -80,7 +84,7 @@ explicit_package_bases = true
 namespace_packages = true
 
 [[tool.mypy.overrides]]
-module = ["structlog.*", "selectolax.*", "aiolimiter.*", "rarfile.*", "pymupdf.*", "fitz.*"]
+module = ["structlog.*", "selectolax.*", "aiolimiter.*", "rarfile.*", "pymupdf.*", "fitz.*", "pdfplumber.*", "pytesseract.*", "PIL.*", "pdf2image.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

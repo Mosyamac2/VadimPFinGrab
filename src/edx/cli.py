@@ -25,6 +25,7 @@ from edx.stages.classifier import build_classifier_service
 from edx.stages.discoverer import build_discoverer_service
 from edx.stages.discoverer.service import compute_since
 from edx.stages.downloader import build_downloader_service
+from edx.stages.text_extractor import build_text_extractor_service
 from edx.stages.unpacker import build_unpacker_service
 from edx.storage import (
     Database,
@@ -142,6 +143,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Restrict classification to specific publication IDs (repeatable).",
     )
     classify_p.set_defaults(func=_cmd_classify)
+
+    extract_p = subparsers.add_parser(
+        "extract-text",
+        help="Extract plain text (and tables) from classified PDFs.",
+    )
+    extract_p.add_argument(
+        "--publication-id",
+        action="append",
+        help="Restrict extraction to specific publication IDs (repeatable).",
+    )
+    extract_p.set_defaults(func=_cmd_extract_text)
 
     return parser
 
@@ -394,6 +406,41 @@ def _cmd_classify(args: argparse.Namespace) -> int:
             classified=len(outcomes),
             machine_readable=sum(o.machine_readable_count for o in outcomes),
             scans=sum(o.scan_count for o in outcomes),
+        )
+    return EXIT_OK
+
+
+def _cmd_extract_text(args: argparse.Namespace) -> int:
+    log = get_logger("edx.cli")
+    settings_or_code = _load_settings_or_exit(args)
+    if isinstance(settings_or_code, int):
+        return settings_or_code
+    settings = settings_or_code
+
+    db = Database(settings.app.paths.state_db)
+    db.migrate()
+    with closing(db.connect()) as conn:
+        publications_repo = PublicationsRepo(db, conn)
+        documents_repo = DocumentsRepo(db, conn)
+        targets = _select_publications(
+            publications_repo,
+            status="classified",
+            publication_ids=args.publication_id,
+        )
+        if not targets:
+            log.info("extract_text_no_pending_publications")
+            return EXIT_OK
+        service = build_text_extractor_service(
+            settings, publications_repo, documents_repo
+        )
+        outcomes = service.run(targets)
+        log.info(
+            "extract_text_finished",
+            publications=len(targets),
+            extracted=len(outcomes),
+            documents=sum(o.documents_processed for o in outcomes),
+            native=sum(o.native_count for o in outcomes),
+            ocr=sum(o.ocr_count for o in outcomes),
         )
     return EXIT_OK
 

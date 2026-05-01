@@ -8,6 +8,7 @@ from edx.config.app_config import (
     ClassifierConfig,
     DiscovererConfig,
     DownloaderConfig,
+    TextExtractorConfig,
     UnpackerConfig,
 )
 from edx.config.event_types_config import EventTypesConfig, EventTypeSpec
@@ -43,6 +44,7 @@ __all__ = [
     "OpenRouterProviderConfig",
     "ReportingStandard",
     "Secrets",
+    "TextExtractorConfig",
     "TickerEntry",
     "TickersConfig",
     "UnpackerConfig",
