@@ -87,6 +87,20 @@ class PublicationsRepo:
                     (status, error, file_hash, now_iso(), publication_id),
                 )
 
+    def mark_incomplete(
+        self, publication_id: str, incomplete: bool = True
+    ) -> None:
+        """Flag a publication as below the completeness threshold (ТЗ §11.2)."""
+        with self.db.transaction(self.conn):
+            self.conn.execute(
+                """
+                UPDATE publications
+                   SET is_incomplete = ?, updated_at = ?
+                 WHERE publication_id = ?
+                """,
+                (1 if incomplete else 0, now_iso(), publication_id),
+            )
+
     def get_by_id(self, publication_id: str) -> PublicationRow | None:
         cursor = self.conn.execute(
             "SELECT * FROM publications WHERE publication_id = ?",
@@ -125,4 +139,5 @@ def _row_to_publication(row: sqlite3.Row) -> PublicationRow:
         last_error=row["last_error"],
         discovered_at=row["discovered_at"],
         updated_at=row["updated_at"],
+        is_incomplete=row["is_incomplete"],
     )

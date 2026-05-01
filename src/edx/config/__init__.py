@@ -10,6 +10,7 @@ from edx.config.app_config import (
     DownloaderConfig,
     TextExtractorConfig,
     UnpackerConfig,
+    ValidatorConfig,
 )
 from edx.config.event_types_config import EventTypesConfig, EventTypeSpec
 from edx.config.llm_config import (
@@ -48,5 +49,6 @@ __all__ = [
     "TickerEntry",
     "TickersConfig",
     "UnpackerConfig",
+    "ValidatorConfig",
     "load_all",
 ]

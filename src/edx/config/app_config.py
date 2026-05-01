@@ -86,6 +86,16 @@ class ClassifierConfig(BaseModel):
     first_pages_to_inspect: int = Field(default=3, ge=1, le=20)
 
 
+class ValidatorConfig(BaseModel):
+    """Validator stage thresholds (ТЗ §11)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Publications with a metric coverage ratio below this fraction are
+    # flagged ``is_incomplete=1`` and surfaced to the operator's QA report.
+    completeness_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
 class TextExtractorConfig(BaseModel):
     """Text Extractor stage knobs (ТЗ §7.1 п.5)."""
 
@@ -113,4 +123,5 @@ class AppConfig(BaseModel):
     unpacker: UnpackerConfig = Field(default_factory=UnpackerConfig)
     classifier: ClassifierConfig = Field(default_factory=ClassifierConfig)
     text_extractor: TextExtractorConfig = Field(default_factory=TextExtractorConfig)
+    validator: ValidatorConfig = Field(default_factory=ValidatorConfig)
     contact_email: str | None = None

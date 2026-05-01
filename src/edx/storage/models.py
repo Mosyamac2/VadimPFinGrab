@@ -65,6 +65,7 @@ class PublicationRow:
     last_error: str | None
     discovered_at: str
     updated_at: str
+    is_incomplete: int = 0
 
 
 @dataclass(frozen=True)

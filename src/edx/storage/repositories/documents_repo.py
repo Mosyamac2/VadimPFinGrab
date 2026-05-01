@@ -77,6 +77,28 @@ class DocumentsRepo:
                 (relative_path, document_id),
             )
 
+    def set_primary_for_publication(
+        self,
+        publication_id: str,
+        primary_document_id: int,
+    ) -> None:
+        """Mark exactly one document as the leading source for the period.
+
+        Clears the flag on every document in the publication first so that the
+        invariant ``at most one is_primary_for_period=1 per publication`` holds.
+        """
+        with self.db.transaction(self.conn):
+            self.conn.execute(
+                "UPDATE documents SET is_primary_for_period = 0 "
+                "WHERE publication_id = ?",
+                (publication_id,),
+            )
+            self.conn.execute(
+                "UPDATE documents SET is_primary_for_period = 1 "
+                "WHERE document_id = ?",
+                (primary_document_id,),
+            )
+
     def list_for_publication(self, publication_id: str) -> list[DocumentRow]:
         cursor = self.conn.execute(
             "SELECT * FROM documents WHERE publication_id = ? ORDER BY document_id",

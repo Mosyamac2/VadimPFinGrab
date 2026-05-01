@@ -61,6 +61,11 @@ text_extractor:
   # normalisation) are stripped as headers/footers.
   header_footer_min_pages: 3
 
+validator:
+  # Publications below this metric-coverage ratio are flagged is_incomplete=1
+  # and routed into the QA-issues report (see ТЗ §11.2).
+  completeness_threshold: 0.5
+
 # Optional contact email — embedded into the User-Agent header used for
 # scraping e-disclosure.ru. Leave empty if you do not want to expose it.
 contact_email: null

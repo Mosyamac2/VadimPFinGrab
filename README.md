@@ -19,7 +19,8 @@ implementation is decomposed into 15 sequential prompts in
 - ✅ Prompt 06 — PDF Classifier stage
 - ✅ Prompt 07 — Text Extractor (native + OCR)
 - ✅ Prompt 08 — LLM provider chain (Anthropic + OpenRouter fallback)
-- ⬜ Prompts 09–15 — pending
+- ✅ Prompt 09 — Metric Extractor (LLM)
+- ⬜ Prompts 10–15 — pending
 
 ## System packages
 
