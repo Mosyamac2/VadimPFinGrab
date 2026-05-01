@@ -86,6 +86,21 @@ class ClassifierConfig(BaseModel):
     first_pages_to_inspect: int = Field(default=3, ge=1, le=20)
 
 
+class OrchestratorConfig(BaseModel):
+    """Orchestrator-level knobs (ТЗ §7).
+
+    ``publication_concurrency`` caps the number of publications a parallel
+    stage handles concurrently (currently honoured by the Downloader's
+    ``asyncio.Semaphore``). The Orchestrator itself runs stages in sequence —
+    the cap therefore controls within-stage fan-out, not cross-stage
+    parallelism.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    publication_concurrency: int = Field(default=4, ge=1, le=64)
+
+
 class GoogleDriveConfig(BaseModel):
     """Excel mart replication target on Google Drive (ТЗ §10.4).
 
@@ -143,4 +158,5 @@ class AppConfig(BaseModel):
     text_extractor: TextExtractorConfig = Field(default_factory=TextExtractorConfig)
     validator: ValidatorConfig = Field(default_factory=ValidatorConfig)
     google_drive: GoogleDriveConfig = Field(default_factory=GoogleDriveConfig)
+    orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
     contact_email: str | None = None

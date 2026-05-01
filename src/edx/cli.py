@@ -23,6 +23,7 @@ from edx import __version__
 from edx.config import AppSettings, ConfigLoadError, load_all
 from edx.http.client import EDisclosureClient, build_user_agent
 from edx.logging_setup import configure, get_logger
+from edx.orchestrator import Orchestrator, StageBundle
 from edx.providers.llm import LLMUnavailableError, build_llm_provider
 from edx.stages.classifier import build_classifier_service
 from edx.stages.discoverer import build_discoverer_service
@@ -85,7 +86,24 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Re-process the last 3 years of publications.",
     )
+    run_p.add_argument(
+        "--ticker",
+        action="append",
+        help="Restrict the pipeline to specific tickers (repeatable).",
+    )
     run_p.set_defaults(func=_cmd_run)
+
+    status_p = subparsers.add_parser(
+        "status",
+        help="Print a summary of the latest pipeline runs.",
+    )
+    status_p.add_argument(
+        "--limit",
+        type=int,
+        default=5,
+        help="Number of recent runs to show (default: 5).",
+    )
+    status_p.set_defaults(func=_cmd_status)
 
     config_p = subparsers.add_parser(
         "config",
@@ -275,53 +293,125 @@ def _load_settings_or_exit(args: argparse.Namespace) -> AppSettings | int:
         return EXIT_CONFIG_ERROR
 
 
-def _execute_pipeline_run(settings: AppSettings, mode: RunMode) -> int:
-    """Run the (currently empty) pipeline scaffolding for the given mode.
-
-    Real stages plug in here in subsequent prompts. For now: migrate the
-    state database, sync tickers from YAML, open + close a row in ``runs``.
-    """
+def _execute_pipeline_run(
+    settings: AppSettings,
+    mode: RunMode,
+    *,
+    ticker_filter: set[str] | None = None,
+) -> int:
+    """Drive the full pipeline DAG via :class:`Orchestrator`."""
     log = get_logger("edx.cli")
     db = Database(settings.app.paths.state_db)
-    applied_versions = db.migrate()
+    db.migrate()
+
+    try:
+        llm_provider = build_llm_provider(settings)
+    except LLMUnavailableError as exc:
+        log.error("llm_unavailable", error=str(exc))
+        return EXIT_RUNTIME_ERROR
 
     with closing(db.connect()) as conn:
-        tickers_repo = TickersRepo(db, conn)
+        publications_repo = PublicationsRepo(db, conn)
+        documents_repo = DocumentsRepo(db, conn)
+        metrics_repo = MetricsRepo(db, conn)
+        events_repo = EventsRepo(db, conn)
+        qa_issues_repo = QAIssuesRepo(db, conn)
         runs_repo = RunsRepo(db, conn)
+        tickers_repo = TickersRepo(db, conn)
+        tickers_repo.upsert_from_config(settings.tickers.tickers)
 
-        ticker_count = tickers_repo.upsert_from_config(settings.tickers.tickers)
-        log.info(
-            "tickers_synced",
-            ticker_count=ticker_count,
-            applied_migrations=applied_versions,
-        )
+        async def _run_pipeline() -> int:
+            from edx.http.client import EDisclosureClient, build_user_agent
 
-        run_id = runs_repo.start_run(mode)
-        log.info(
-            "cli_command_invoked",
-            command=mode,
-            run_id=run_id,
-            ticker_count=ticker_count,
-        )
+            async with EDisclosureClient(
+                base_url=settings.app.discoverer.base_url,
+                user_agent=build_user_agent(settings),
+                requests_per_second=settings.app.discoverer.requests_per_second,
+                request_timeout_s=settings.app.discoverer.request_timeout_s,
+                max_retries=settings.app.discoverer.max_retries,
+                retry_min_wait_s=settings.app.discoverer.retry_min_wait_s,
+                retry_max_wait_s=settings.app.discoverer.retry_max_wait_s,
+                respect_robots=settings.app.discoverer.respect_robots,
+            ) as http_client:
+                from edx.stages.discoverer import build_discoverer_service
 
-        try:
-            stats = {
-                "ticker_count": ticker_count,
-                "migrations_applied": applied_versions,
-                "publications_total": 0,
-            }
-            runs_repo.finish_run(run_id, status="succeeded", stats=stats)
-            log.info("run_finished", run_id=run_id, status="succeeded")
-        except Exception as exc:
-            runs_repo.finish_run(
-                run_id,
-                status="failed",
-                error_summary=f"{type(exc).__name__}: {exc}",
-            )
-            log.error("run_finished", run_id=run_id, status="failed", error=str(exc))
-            return EXIT_RUNTIME_ERROR
+                discoverer, _ = build_discoverer_service(
+                    settings, publications_repo, client=http_client
+                )
+                downloader = build_downloader_service(
+                    settings, publications_repo, client=http_client
+                )
+                unpacker = build_unpacker_service(
+                    settings, db, publications_repo, documents_repo
+                )
+                classifier = build_classifier_service(
+                    settings, publications_repo, documents_repo
+                )
+                text_extractor = build_text_extractor_service(
+                    settings, publications_repo, documents_repo
+                )
+                metric_extractor = build_metric_extractor_service(
+                    settings,
+                    publications_repo,
+                    documents_repo,
+                    metrics_repo,
+                    llm_provider,
+                )
+                event_extractor = build_event_extractor_service(
+                    settings,
+                    publications_repo,
+                    documents_repo,
+                    events_repo,
+                    llm_provider,
+                )
+                validator = build_validator_service(
+                    settings, publications_repo, metrics_repo, qa_issues_repo
+                )
+                writer = build_writer_service(
+                    settings,
+                    publications_repo,
+                    metrics_repo,
+                    events_repo,
+                    qa_issues_repo,
+                    tickers_repo,
+                )
+                replicator = build_replicator_service(settings, runs_repo)
 
-    return EXIT_OK
+                bundle = StageBundle(
+                    discoverer=discoverer,
+                    downloader=downloader,
+                    unpacker=unpacker,
+                    classifier=classifier,
+                    text_extractor=text_extractor,
+                    metric_extractor=metric_extractor,
+                    event_extractor=event_extractor,
+                    validator=validator,
+                    writer=writer,
+                    replicator=replicator,
+                )
+                orchestrator = Orchestrator(
+                    runs_repo=runs_repo,
+                    publications_repo=publications_repo,
+                    metrics_repo=metrics_repo,
+                    events_repo=events_repo,
+                    stages=bundle,
+                    ticker_entries=settings.tickers.tickers,
+                    excel_path=settings.app.paths.excel_path,
+                    backfill_years=settings.app.mode.backfill_years,
+                    ticker_filter=ticker_filter,
+                )
+                outcome = await orchestrator.run(mode)
+                log.info(
+                    "cli_command_invoked",
+                    command=mode,
+                    run_id=outcome.run_id,
+                    status=outcome.status,
+                )
+                if outcome.status == "failed":
+                    return EXIT_RUNTIME_ERROR
+                return EXIT_OK
+
+        return asyncio.run(_run_pipeline())
 
 
 def _cmd_update(args: argparse.Namespace) -> int:
@@ -336,7 +426,44 @@ def _cmd_run(args: argparse.Namespace) -> int:
     if isinstance(settings_or_code, int):
         return settings_or_code
     mode: RunMode = "full_reload" if args.full_reload else "update"
-    return _execute_pipeline_run(settings_or_code, mode=mode)
+    ticker_filter = set(args.ticker) if args.ticker else None
+    return _execute_pipeline_run(
+        settings_or_code, mode=mode, ticker_filter=ticker_filter
+    )
+
+
+def _cmd_status(args: argparse.Namespace) -> int:
+    settings_or_code = _load_settings_or_exit(args)
+    if isinstance(settings_or_code, int):
+        return settings_or_code
+    settings = settings_or_code
+
+    db = Database(settings.app.paths.state_db)
+    db.migrate()
+    with closing(db.connect()) as conn:
+        runs = RunsRepo(db, conn).latest(limit=args.limit)
+    if not runs:
+        print("(no runs recorded yet)")
+        return EXIT_OK
+    for run in runs:
+        stats = json.loads(run.stats_json) if run.stats_json else {}
+        print(
+            f"#{run.run_id} {run.mode:11s} {run.status:10s} "
+            f"started={run.started_at} duration={stats.get('duration_seconds', '?')}s"
+        )
+        if stats:
+            by_status = stats.get("publications_by_status", {})
+            print(
+                f"    publications={stats.get('publications_total', 0)} "
+                f"by_status={by_status} "
+                f"metrics={stats.get('metrics_rows', 0)} "
+                f"events={stats.get('events_rows', 0)}"
+            )
+        if run.excel_drive_link:
+            print(f"    drive: {run.excel_drive_link}")
+        if run.error_summary:
+            print(f"    error: {run.error_summary}")
+    return EXIT_OK
 
 
 def _cmd_discover(args: argparse.Namespace) -> int:

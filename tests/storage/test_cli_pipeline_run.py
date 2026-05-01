@@ -26,11 +26,13 @@ def _run_cli(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _make_isolated_workspace(tmp_path: Path) -> Path:
+def _make_isolated_workspace(tmp_path: Path, *, empty_tickers: bool = False) -> Path:
     cfg = tmp_path / "config"
     cfg.mkdir()
     for src in REPO_CONFIG_DIR.glob("*.yaml"):
         (cfg / src.name).write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    if empty_tickers:
+        (cfg / "tickers.yaml").write_text("tickers: []\n", encoding="utf-8")
     # Redirect state DB and other paths under tmp_path so the test stays isolated
     app_path = cfg / "app.yaml"
     app = yaml.safe_load(app_path.read_text(encoding="utf-8"))
@@ -46,12 +48,21 @@ def _make_isolated_workspace(tmp_path: Path) -> Path:
 
 
 def test_edx_update_creates_state_db_and_runs_row(tmp_path: Path) -> None:
-    cfg_dir = _make_isolated_workspace(tmp_path)
+    """Hermetic CLI smoke: empty tickers + fake LLM key so we never touch the network."""
+    cfg_dir = _make_isolated_workspace(tmp_path, empty_tickers=True)
     state_db = tmp_path / "data" / "state.sqlite"
 
-    result = _run_cli(["--config-dir", str(cfg_dir), "update"], cwd=tmp_path)
+    env = os.environ.copy()
+    env["ANTHROPIC_API_KEY"] = "fake-test-key"
+    result = subprocess.run(
+        [sys.executable, "-m", "edx.cli", "--config-dir", str(cfg_dir), "update"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+        cwd=tmp_path,
+    )
     assert result.returncode == 0, result.stderr or result.stdout
-
     assert state_db.exists()
 
     events = [
@@ -59,11 +70,11 @@ def test_edx_update_creates_state_db_and_runs_row(tmp_path: Path) -> None:
         for line in result.stdout.strip().splitlines()
         if line.startswith("{")
     ]
-    migration_events = [e for e in events if e.get("event") == "migration_applied"]
-    assert any(e.get("version") == "0001_init" for e in migration_events)
-    assert any(e.get("event") == "tickers_synced" for e in events)
+    assert any(e.get("event") == "migration_applied" and e.get("version") == "0001_init"
+               for e in events)
     assert any(
-        e.get("event") == "run_finished" and e.get("status") == "succeeded"
+        e.get("event") == "orchestrator_run_finished"
+        and e.get("status") == "succeeded"
         for e in events
     )
 
@@ -75,31 +86,39 @@ def test_edx_update_creates_state_db_and_runs_row(tmp_path: Path) -> None:
         assert runs[0]["status"] == "succeeded"
         assert runs[0]["mode"] == "update"
         stats = json.loads(runs[0]["stats_json"])
-        assert stats["ticker_count"] == 3
-        assert stats["migrations_applied"][0] == "0001_init"
-        assert "0002_classifier" in stats["migrations_applied"]
-
-        tickers = list(conn.execute("SELECT ticker FROM tickers ORDER BY ticker"))
-        assert [r["ticker"] for r in tickers] == ["GAZP", "LKOH", "SBER"]
+        # No tickers configured ⇒ no publications discovered.
+        assert stats["publications_total"] == 0
+        assert stats["new_publications"] == 0
     finally:
         conn.close()
 
 
 def test_edx_update_idempotent_second_run(tmp_path: Path) -> None:
-    cfg_dir = _make_isolated_workspace(tmp_path)
+    cfg_dir = _make_isolated_workspace(tmp_path, empty_tickers=True)
     state_db = tmp_path / "data" / "state.sqlite"
 
-    first = _run_cli(["--config-dir", str(cfg_dir), "update"], cwd=tmp_path)
-    assert first.returncode == 0
+    env = os.environ.copy()
+    env["ANTHROPIC_API_KEY"] = "fake-test-key"
 
-    second = _run_cli(["--config-dir", str(cfg_dir), "update"], cwd=tmp_path)
+    def _run() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-m", "edx.cli", "--config-dir", str(cfg_dir), "update"],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+            cwd=tmp_path,
+        )
+
+    first = _run()
+    assert first.returncode == 0
+    second = _run()
     assert second.returncode == 0
 
     conn = sqlite3.connect(state_db)
     conn.row_factory = sqlite3.Row
     try:
         runs_count = conn.execute("SELECT COUNT(*) AS c FROM runs").fetchone()["c"]
-        ticker_count = conn.execute("SELECT COUNT(*) AS c FROM tickers").fetchone()["c"]
         migration_count = conn.execute(
             "SELECT COUNT(*) AS c FROM schema_migrations"
         ).fetchone()["c"]
@@ -107,5 +126,4 @@ def test_edx_update_idempotent_second_run(tmp_path: Path) -> None:
         conn.close()
 
     assert runs_count == 2
-    assert ticker_count == 3
     assert migration_count >= 1

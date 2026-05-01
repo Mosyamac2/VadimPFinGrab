@@ -45,23 +45,49 @@ def _find_event(stdout: str, name: str) -> dict[str, object]:
     raise AssertionError(f"event {name!r} not found in stdout: {stdout!r}")
 
 
-def test_cli_update_succeeds_with_reference_config() -> None:
-    result = _run_cli(["update"])
-    assert result.returncode == 0, result.stderr
+def _make_isolated_workspace_for_orchestrator(tmp_path: Path) -> Path:
+    """Tmp config copy with empty tickers + redirected paths for hermetic CLI runs."""
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir()
+    for src in REPO_CONFIG_DIR.glob("*.yaml"):
+        (cfg_dir / src.name).write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    # Override tickers to empty so the orchestrator does no network I/O.
+    (cfg_dir / "tickers.yaml").write_text("tickers: []\n", encoding="utf-8")
+    # Redirect data/output paths into tmp_path.
+    app = yaml.safe_load((cfg_dir / "app.yaml").read_text(encoding="utf-8"))
+    app["paths"]["data_dir"] = str(tmp_path / "data")
+    app["paths"]["raw_dir"] = str(tmp_path / "data" / "raw")
+    app["paths"]["processed_dir"] = str(tmp_path / "data" / "processed")
+    app["paths"]["state_db"] = str(tmp_path / "data" / "state.sqlite")
+    app["paths"]["output_dir"] = str(tmp_path / "output")
+    app["paths"]["excel_path"] = str(tmp_path / "output" / "e-disclosure.xlsx")
+    app["paths"]["logs_dir"] = str(tmp_path / "logs")
+    (cfg_dir / "app.yaml").write_text(yaml.safe_dump(app), encoding="utf-8")
+    return cfg_dir
+
+
+def test_cli_update_succeeds_with_reference_config(tmp_path: Path) -> None:
+    cfg_dir = _make_isolated_workspace_for_orchestrator(tmp_path)
+    result = _run_cli(
+        ["--config-dir", str(cfg_dir), "update"],
+        env={"ANTHROPIC_API_KEY": "fake-key-for-test"},
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
     invoked = _find_event(result.stdout, "cli_command_invoked")
     assert invoked["command"] == "update"
-    assert invoked["ticker_count"] == 3
-    finished = _find_event(result.stdout, "run_finished")
-    assert finished["status"] == "succeeded"
+    assert invoked["status"] == "succeeded"
 
 
-def test_cli_run_full_reload_succeeds() -> None:
-    result = _run_cli(["run", "--full-reload"])
-    assert result.returncode == 0, result.stderr
+def test_cli_run_full_reload_succeeds(tmp_path: Path) -> None:
+    cfg_dir = _make_isolated_workspace_for_orchestrator(tmp_path)
+    result = _run_cli(
+        ["--config-dir", str(cfg_dir), "run", "--full-reload"],
+        env={"ANTHROPIC_API_KEY": "fake-key-for-test"},
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
     invoked = _find_event(result.stdout, "cli_command_invoked")
     assert invoked["command"] == "full_reload"
-    finished = _find_event(result.stdout, "run_finished")
-    assert finished["status"] == "succeeded"
+    assert invoked["status"] == "succeeded"
 
 
 def test_cli_returns_exit_code_2_on_extra_field(tmp_path: Path) -> None:

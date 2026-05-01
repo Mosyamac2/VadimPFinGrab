@@ -119,10 +119,37 @@ class PublicationsRepo:
         row = cursor.fetchone()
         return row["d"] if row and row["d"] is not None else None
 
+    def reset_status_to_discovered_since(self, cutoff_date: str) -> int:
+        """Force every publication on/after ``cutoff_date`` back to ``discovered``.
+
+        Used by ``Orchestrator.run("full_reload")``. Files on disk are kept
+        — the Downloader/Unpacker will see matching hashes and skip the local
+        steps. LLM-stages re-fire only if ``data/processed/_llm_cache`` is
+        cleared separately.
+        """
+        with self.db.transaction(self.conn):
+            cursor = self.conn.execute(
+                """
+                UPDATE publications
+                   SET status     = 'discovered',
+                       last_error = NULL,
+                       updated_at = ?
+                 WHERE publication_date >= ?
+                """,
+                (now_iso(), cutoff_date),
+            )
+            return cursor.rowcount
+
     def list_by_status(self, status: PublicationStatus) -> list[PublicationRow]:
         cursor = self.conn.execute(
             "SELECT * FROM publications WHERE status = ? ORDER BY publication_date",
             (status,),
+        )
+        return [_row_to_publication(row) for row in cursor]
+
+    def list_all(self) -> list[PublicationRow]:
+        cursor = self.conn.execute(
+            "SELECT * FROM publications ORDER BY publication_date"
         )
         return [_row_to_publication(row) for row in cursor]
 
