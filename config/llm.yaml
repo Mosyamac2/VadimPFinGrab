@@ -20,4 +20,10 @@ max_tokens: 4096
 temperature: 0.0
 request_timeout_s: 120
 max_retries: 3
+retry_min_wait_s: 0.5
+retry_max_wait_s: 10
 concurrency: 4
+# When true, cache successful responses keyed by request content (system +
+# user_text + PDF bytes + JSON schema). Idempotent: re-running the pipeline
+# over the same publication never re-bills the LLM.
+cache_enabled: true

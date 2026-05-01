@@ -11,6 +11,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
+import time
 from collections.abc import Sequence
 from contextlib import closing
 from pathlib import Path
@@ -155,7 +157,42 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     extract_p.set_defaults(func=_cmd_extract_text)
 
+    cache_p = subparsers.add_parser(
+        "cache",
+        help="Manage on-disk caches.",
+    )
+    cache_sub = cache_p.add_subparsers(
+        dest="cache_command", required=True, metavar="subcommand"
+    )
+    cache_prune_p = cache_sub.add_parser(
+        "prune",
+        help="Remove LLM cache entries older than the given duration.",
+    )
+    cache_prune_p.add_argument(
+        "--older-than",
+        type=_parse_duration,
+        default=30 * 86400,
+        help="Drop entries older than DURATION (e.g. 30d, 12h, 45m). Default: 30d.",
+    )
+    cache_prune_p.set_defaults(func=_cmd_cache_prune)
+
     return parser
+
+
+_DURATION_RE = re.compile(r"^\s*(\d+)\s*([smhdw])\s*$", re.IGNORECASE)
+_DURATION_MULTIPLIER = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 7 * 86400}
+
+
+def _parse_duration(value: str) -> int:
+    """Parse strings like ``30d``, ``12h`` into seconds."""
+    match = _DURATION_RE.match(value)
+    if not match:
+        raise argparse.ArgumentTypeError(
+            f"invalid duration {value!r} — expected like 30d, 12h, 45m"
+        )
+    amount = int(match.group(1))
+    unit = match.group(2).lower()
+    return amount * _DURATION_MULTIPLIER[unit]
 
 
 def _load_settings_or_exit(args: argparse.Namespace) -> AppSettings | int:
@@ -442,6 +479,44 @@ def _cmd_extract_text(args: argparse.Namespace) -> int:
             native=sum(o.native_count for o in outcomes),
             ocr=sum(o.ocr_count for o in outcomes),
         )
+    return EXIT_OK
+
+
+def _cmd_cache_prune(args: argparse.Namespace) -> int:
+    log = get_logger("edx.cli")
+    settings_or_code = _load_settings_or_exit(args)
+    if isinstance(settings_or_code, int):
+        return settings_or_code
+    settings = settings_or_code
+
+    cache_dir = settings.app.paths.processed_dir / "_llm_cache"
+    if not cache_dir.exists():
+        log.info(
+            "cache_prune_skipped_no_cache_dir", path=str(cache_dir)
+        )
+        return EXIT_OK
+
+    cutoff = time.time() - float(args.older_than)
+    removed = 0
+    kept = 0
+    for entry in cache_dir.glob("*.json"):
+        try:
+            mtime = entry.stat().st_mtime
+        except FileNotFoundError:
+            continue
+        if mtime < cutoff:
+            entry.unlink()
+            removed += 1
+        else:
+            kept += 1
+
+    log.info(
+        "cache_prune_done",
+        path=str(cache_dir),
+        older_than_seconds=args.older_than,
+        removed=removed,
+        kept=kept,
+    )
     return EXIT_OK
 
 
