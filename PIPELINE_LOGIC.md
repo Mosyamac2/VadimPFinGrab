@@ -302,13 +302,20 @@ LLM на этой стадии не используется.
      OpenRouter — нет);
    - в публикации ровно один документ;
    - этот документ machine-readable (`is_machine_readable=1`);
-   - файл существует на диске;
-   - источник **не ISSUER** (Patch 21 — Issuer Report из 60+
-     страниц всегда обрезается до раздела 1.4 «Основные финансовые
-     показатели» через `extract_section_1_4()`, иначе LLM тратит
-     токены на разделы 1.1–1.3 + биографии менеджмента).
+   - **scan_ratio ≤ `metric_extractor.scan_ratio_threshold`** (Patch 29,
+     default 0.10) — `scan_ratio = scan_pages / page_count`. Гибридные
+     документы (банковские РСБУ-формы с обложкой-аудитом + сканированными
+     формами) уходят на text-path: Anthropic vision не вытягивает цифры
+     из тонкой grid-таблицы РСБУ-баланса с подписью главбуха;
+   - **standard ∈ `metric_extractor.pdf_input_standards`** (Patch 29,
+     default `["IFRS"]`) — эмпирически только IFRS-отчёты CHMF/SBER/VTBR
+     надёжно работают через нативный PDF; RSBU и Issuer Report всегда
+     уходят на text-path;
+   - файл существует на диске.
 
    Иначе — отправляем текст, собранный из JSON-файлов Text Extractor.
+   ISSUER-источник дополнительно обрезается до раздела 1.4 (Patch 21,
+   `extract_section_1_4`).
 4. **Строит system prompt** через `build_system_prompt(profile,
    source_standard)` — деталях ниже в §5.2.
 5. **Строит JSON-схему** через `build_metric_extraction_schema(...)` —
@@ -860,6 +867,7 @@ LLM не используется. OCR не используется.
 | Сплошные `discoverer_no_publications_for_type` | ServicePipe — переключиться на `playwright` (USER_GUIDE → ServicePipe / headless Chromium) |
 | 429 от Anthropic при `--full-reload` | ITPM tier; user_text доминирует над system prompt, prompt caching не спасает целиком — поднимать tier или ставить меньшую `concurrency` в `llm.yaml` |
 | `cache_hit_ratio: 0.0` устойчиво | Проверить `enable_prompt_caching: true`; не менять `metrics.yaml` / `tickers.yaml` между прогонами; `cache_ttl: 5m` слишком короток для длинных прогонов — переключить в `1h` |
+| `coverage=0` при `input_tokens ≈ 3100, output_tokens ≈ 133` для RSBU-документа | Маршрутизация ушла в native-PDF путь Anthropic, и Anthropic vision не справился. Проверить `metric_extract_start.send_pdf` в логе — для RSBU должно быть `false`. Если `true` — `metric_extractor.pdf_input_standards` неверно сконфигурирован (Patch 29) |
 
 Полный JSON-лог одного прогона восстанавливает всю картину
 end-to-end:

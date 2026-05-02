@@ -154,6 +154,25 @@ class ValidatorConfig(BaseModel):
     completeness_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
+class MetricExtractorConfig(BaseModel):
+    """Metric Extractor stage knobs (Patch 29+)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Patch 29: above this scan-page ratio the document goes through the
+    # text-extract path (our own hybrid OCR), not Anthropic native-PDF.
+    # Anthropic vision fails to read numbers from Russian RSBU forms with
+    # thin grid + signature overlay; default 0.10 still admits IFRS
+    # reports with 1-2 cover-page scans.
+    scan_ratio_threshold: float = Field(default=0.10, ge=0.0, le=1.0)
+    # Patch 29: which reporting standards may be sent as native PDF.
+    # Empirically only IFRS works reliably; RSBU/ISSUER always need
+    # text-path. Operator can widen at their own risk.
+    pdf_input_standards: tuple[
+        Literal["IFRS", "RSBU", "ISSUER"], ...
+    ] = ("IFRS",)
+
+
 class TextExtractorConfig(BaseModel):
     """Text Extractor stage knobs (ТЗ §7.1 п.5)."""
 
@@ -186,6 +205,7 @@ class AppConfig(BaseModel):
     unpacker: UnpackerConfig = Field(default_factory=UnpackerConfig)
     classifier: ClassifierConfig = Field(default_factory=ClassifierConfig)
     text_extractor: TextExtractorConfig = Field(default_factory=TextExtractorConfig)
+    metric_extractor: MetricExtractorConfig = Field(default_factory=MetricExtractorConfig)
     validator: ValidatorConfig = Field(default_factory=ValidatorConfig)
     google_drive: GoogleDriveConfig = Field(default_factory=GoogleDriveConfig)
     orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)

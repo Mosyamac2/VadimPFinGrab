@@ -81,6 +81,14 @@ class MetricExtractorService:
         temperature: float = 0.0,
         completeness_threshold: float = 0.5,
         issuer_trim_max_chars: int = 30_000,
+        # Patch 29: оборона от Anthropic native-PDF на сканированных формах.
+        # Документы с долей scan-страниц > scan_ratio_threshold идут через
+        # text-extract path, даже если is_machine_readable=1. Нативный
+        # PDF-input оставляем только для standards в pdf_input_standards
+        # (по умолчанию IFRS — на нём Anthropic vision реально работает;
+        # RSBU-формы и Issuer Report шлём как text).
+        scan_ratio_threshold: float = 0.10,
+        pdf_input_standards: tuple[str, ...] = ("IFRS",),
     ) -> None:
         self.llm_provider = llm_provider
         self.publications_repo = publications_repo
@@ -94,6 +102,8 @@ class MetricExtractorService:
         self.temperature = temperature
         self.completeness_threshold = completeness_threshold
         self.issuer_trim_max_chars = issuer_trim_max_chars
+        self.scan_ratio_threshold = scan_ratio_threshold
+        self.pdf_input_standards = tuple(pdf_input_standards)
         # Cache prompt+schema per (profile, source_standard). At most
         # 2 profiles × 3 standards = 6 entries.
         self._prompt_cache: dict[tuple[str, str], str] = {}
@@ -177,6 +187,11 @@ class MetricExtractorService:
         # ``chosen`` is empty, which is handled above; reassure mypy here.
         assert chosen_standard is not None
         request = self._build_request(pub, chosen, profile, chosen_standard)
+        # Patch 29: surface routing inputs so the operator can tell at a
+        # glance *why* a doc went pdf-vs-text without diffing the code.
+        page_count = primary_doc.page_count or 0
+        scan_pages = primary_doc.scan_pages_count or 0
+        scan_ratio = scan_pages / page_count if page_count else 1.0
         self._log.info(
             "metric_extract_start",
             publication_id=pub.publication_id,
@@ -184,6 +199,8 @@ class MetricExtractorService:
             standard=chosen_standard,
             docs=[d.relative_path for d in chosen],
             sends_pdf=request.pdf_bytes is not None,
+            scan_ratio=round(scan_ratio, 3),
+            pdf_input_standards=list(self.pdf_input_standards),
         )
 
         response = await self.llm_provider.complete(request)
@@ -331,15 +348,31 @@ class MetricExtractorService:
             self.raw_dir / pub.ticker / pub.publication_id / primary_doc.relative_path
         )
 
-        # Patch 21: Issuer Reports go through the trimmed-text path
-        # always — sending the full 60+ page PDF when only section 1.4
-        # carries KPIs is wasted tokens.
+        # Patch 29: routing into PDF vs text path is driven by two
+        # configurable knobs:
+        #   * scan_ratio = scan_pages / page_count. Hybrid documents
+        #     (any non-trivial slice of scanned pages) are NEVER fed to
+        #     the Anthropic native-PDF channel — its vision pipeline
+        #     fails to extract numbers from Russian RSBU forms with thin
+        #     grid lines and signature overlay. We send our own
+        #     hybrid-OCR text instead.
+        #   * pdf_input_standards. Empirically only IFRS reports
+        #     (CHMF/SBER/VTBR consolidated) survive the native PDF path
+        #     reliably. RSBU and Issuer Report always go via text-path
+        #     (the latter additionally trimmed to section 1.4 by Patch 21).
+        # ``page_count == 0`` (broken PDF) treats as full-scan to be safe.
+        page_count = primary_doc.page_count or 0
+        scan_pages = primary_doc.scan_pages_count or 0
+        scan_ratio = scan_pages / page_count if page_count else 1.0
+        is_low_scan = scan_ratio <= self.scan_ratio_threshold
+        is_pdf_friendly = standard in self.pdf_input_standards
         send_pdf = (
             self.llm_provider.supports_pdf_input
             and len(chosen) == 1
             and primary_doc.is_machine_readable == 1
+            and is_low_scan
+            and is_pdf_friendly
             and full_path.is_file()
-            and standard != "ISSUER"
         )
 
         if send_pdf:

@@ -95,6 +95,19 @@ text_extractor:
   # fallback can't blow the prompt budget.
   issuer_trim_max_chars: 30000
 
+metric_extractor:
+  # Patch 29: defence against Anthropic native-PDF on scanned RSBU forms.
+  # Documents whose scan-page ratio exceeds the threshold are routed
+  # through our own hybrid-OCR text path even when is_machine_readable=1.
+  # Default 0.10 keeps IFRS reports with 1-2 cover scans on the PDF path
+  # but moves real hybrids (CHMF/SBER/VTBR RSBU + audit preamble) to text.
+  scan_ratio_threshold: 0.10
+  # Patch 29: which reporting standards may be sent as native PDF.
+  # Empirically only IFRS extracts reliably; RSBU forms collapse to
+  # coverage 0% via Anthropic vision. ISSUER text is trimmed by Patch 21
+  # so it always goes via text-path regardless. Widen at your own risk.
+  pdf_input_standards: ["IFRS"]
+
 validator:
   # Publications below this metric-coverage ratio are flagged is_incomplete=1
   # and routed into the QA-issues report (see ТЗ §11.2).
