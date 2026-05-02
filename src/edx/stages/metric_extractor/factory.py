@@ -27,4 +27,5 @@ def build_metric_extractor_service(
         max_tokens=settings.llm.max_tokens,
         temperature=settings.llm.temperature,
         completeness_threshold=settings.app.validator.completeness_threshold,
+        issuer_trim_max_chars=settings.app.text_extractor.issuer_trim_max_chars,
     )

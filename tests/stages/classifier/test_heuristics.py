@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import pytest
+
 from edx.stages.classifier.heuristics import (
     detect_report_form,
     detect_reporting_standard,
+    reporting_standard_for_type_code,
 )
 
 
@@ -79,3 +82,37 @@ def test_detect_report_form_cover() -> None:
 def test_detect_report_form_other_default() -> None:
     assert detect_report_form("Просто текст без признаков формы.") == "other"
     assert detect_report_form("") == "other"
+
+
+# --- Patch 21 — ISSUER markers + type_code mapping ---------------------
+
+
+def test_detect_reporting_standard_issuer_dominant() -> None:
+    text = (
+        "Ежеквартальный отчёт эмитента эмиссионных ценных бумаг. "
+        "1.4 Основные финансовые показатели..."
+    )
+    assert detect_reporting_standard(text) == "ISSUER"
+
+
+def test_detect_reporting_standard_ties_with_issuer_resolves_other() -> None:
+    text = "ifrs пбу ежеквартальный отчёт эмитента"
+    # All three at 1 hit → no strict majority → OTHER.
+    assert detect_reporting_standard(text) == "OTHER"
+
+
+@pytest.mark.parametrize(
+    "type_code, expected",
+    [
+        (2, "ANNUAL"),
+        (3, "RSBU"),
+        (4, "IFRS"),
+        (5, "ISSUER"),
+        (1, None),
+        (None, None),
+    ],
+)
+def test_reporting_standard_for_type_code_mapping(
+    type_code: int | None, expected: str | None
+) -> None:
+    assert reporting_standard_for_type_code(type_code) == expected

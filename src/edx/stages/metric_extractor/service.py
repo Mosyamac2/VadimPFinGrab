@@ -13,7 +13,7 @@ import json
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Literal
+from typing import Final
 
 from pydantic import ValidationError
 
@@ -31,6 +31,7 @@ from edx.stages.metric_extractor.models import (
 )
 from edx.stages.metric_extractor.prompts import build_system_prompt
 from edx.stages.metric_extractor.schema import build_metric_extraction_schema
+from edx.stages.text_extractor.issuer_trim import extract_section_1_4
 from edx.storage import (
     DocumentRow,
     DocumentsRepo,
@@ -79,6 +80,7 @@ class MetricExtractorService:
         max_tokens: int = 4096,
         temperature: float = 0.0,
         completeness_threshold: float = 0.5,
+        issuer_trim_max_chars: int = 30_000,
     ) -> None:
         self.llm_provider = llm_provider
         self.publications_repo = publications_repo
@@ -91,6 +93,7 @@ class MetricExtractorService:
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.completeness_threshold = completeness_threshold
+        self.issuer_trim_max_chars = issuer_trim_max_chars
         # Cache prompt+schema per (profile, source_standard). At most
         # 2 profiles × 3 standards = 6 entries.
         self._prompt_cache: dict[tuple[str, str], str] = {}
@@ -312,11 +315,15 @@ class MetricExtractorService:
             self.raw_dir / pub.ticker / pub.publication_id / primary_doc.relative_path
         )
 
+        # Patch 21: Issuer Reports go through the trimmed-text path
+        # always — sending the full 60+ page PDF when only section 1.4
+        # carries KPIs is wasted tokens.
         send_pdf = (
             self.llm_provider.supports_pdf_input
             and len(chosen) == 1
             and primary_doc.is_machine_readable == 1
             and full_path.is_file()
+            and standard != "ISSUER"
         )
 
         if send_pdf:
@@ -356,6 +363,15 @@ class MetricExtractorService:
             f"Эмитент: {pub.ticker} (профиль {profile_name}). "
             f"Стандарт отчётности: {standard}.",
         ]
+        if standard == "ISSUER":
+            # Patch 21: nudge the LLM toward the KPI table; the trimmed
+            # slice below already contains exactly that section.
+            sections.append(
+                "Перед тобой раздел 1.4 «Основные финансовые показатели» "
+                "ежеквартального отчёта эмитента. Извлекай значения только "
+                "из сводных KPI-таблиц этого раздела; не пытайся достроить "
+                "то, чего нет."
+            )
         for doc in chosen:
             if not doc.text_extract_path:
                 continue
@@ -378,12 +394,36 @@ class MetricExtractorService:
                     error=str(exc),
                 )
                 continue
-            sections.append(f"\n=== Документ: {doc.relative_path} ===")
-            for page in payload.get("pages", []):
-                sections.append(
-                    f"--- page {page.get('page_number')} ---"
+            doc_text = "\n".join(
+                f"--- page {page.get('page_number')} ---\n"
+                f"{page.get('text', '')}"
+                for page in payload.get("pages", [])
+            )
+            if standard == "ISSUER":
+                trim = extract_section_1_4(
+                    doc_text, max_chars=self.issuer_trim_max_chars
                 )
-                sections.append(page.get("text", ""))
+                for warning in trim.warnings:
+                    self._log.warning(
+                        "metric_extract_issuer_trim",
+                        publication_id=pub.publication_id,
+                        document_id=doc.document_id,
+                        detail=warning,
+                    )
+                if trim.content is not None:
+                    self._log.info(
+                        "metric_extract_issuer_section_extracted",
+                        publication_id=pub.publication_id,
+                        document_id=doc.document_id,
+                        anchor_label=trim.anchor_label_seen,
+                        end_anchor=trim.end_anchor_seen,
+                        chars=len(trim.content),
+                    )
+                    doc_text = trim.content
+                # ``trim.content is None`` → fall back to the full doc_text
+                # (graceful degradation, with the warning above logged).
+            sections.append(f"\n=== Документ: {doc.relative_path} ===")
+            sections.append(doc_text)
         return "\n".join(sections)
 
     def _build_metric_rows(
@@ -398,15 +438,11 @@ class MetricExtractorService:
         extracted_count = 0
         requested_count = 0
 
+        # Patch 21: storage now accepts ISSUER along with IFRS/RSBU (see
+        # migration 0009 + the widened ``ReportingStandard`` Literal),
+        # so the Patch-19 ISSUER→RSBU compatibility shim is gone — we
+        # write ``period.reporting_standard`` straight through.
         for period in result.extractions:
-            # Storage's ``MetricInput.reporting_standard`` is currently
-            # ``Literal["IFRS","RSBU"]`` (CHECK constraint in 0001_init).
-            # Patch 21 will widen it to include ISSUER along with a CHECK
-            # migration; until then, fall back to RSBU when the LLM
-            # claims ISSUER so the row still inserts.
-            storage_standard: Literal["IFRS", "RSBU"] = (
-                "IFRS" if period.reporting_standard == "IFRS" else "RSBU"
-            )
             for canonical in applicable_metrics:
                 requested_count += 1
                 spec = profile.metrics[canonical]
@@ -421,7 +457,7 @@ class MetricExtractorService:
                         ticker=pub.ticker,
                         reporting_date=period.reporting_date,
                         period_type=period.period_type,
-                        reporting_standard=storage_standard,
+                        reporting_standard=period.reporting_standard,
                         metric_name=canonical,
                         value=normalized_value,
                         currency=period.currency,

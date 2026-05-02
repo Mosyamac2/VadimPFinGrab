@@ -36,8 +36,12 @@ ALLOWED_PUBLICATION_STATUSES: Final[frozenset[str]] = frozenset(
 )
 
 PublicationType = Literal["report", "event"]
-ReportingStandardWithOther = Literal["IFRS", "RSBU", "OTHER"]
-ReportingStandard = Literal["IFRS", "RSBU"]
+# Patch 21: storage now accepts ISSUER (and ANNUAL on documents) along
+# with the original IFRS/RSBU/OTHER. The CHECK constraints on
+# ``documents.reporting_standard`` and ``metrics.reporting_standard`` are
+# widened by migration 0009; the Literals here mirror them.
+ReportingStandardWithOther = Literal["IFRS", "RSBU", "OTHER", "ISSUER", "ANNUAL"]
+ReportingStandard = Literal["IFRS", "RSBU", "ISSUER"]
 PeriodType = Literal["Q1", "Q2", "Q3", "Q4", "H1", "H2", "9M", "FY"]
 RunStatus = Literal["running", "succeeded", "failed", "partial"]
 RunMode = Literal["update", "full_reload"]

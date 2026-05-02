@@ -155,6 +155,11 @@ class TextExtractorConfig(BaseModel):
     # Header/footer recurrence detector: a line must appear on at least this
     # many pages to be eligible for stripping.
     header_footer_min_pages: int = Field(default=3, ge=2)
+    # Patch 21: Issuer Reports (type=5) are 50–100 pages of MD&A with KPIs
+    # in section 1.4 only. The Metric Extractor trims to that section
+    # before LLM dispatch; this caps the final slice so even an
+    # un-anchored fallback can't blow the prompt budget.
+    issuer_trim_max_chars: int = Field(default=30_000, ge=1)
 
 
 class AppConfig(BaseModel):

@@ -20,6 +20,7 @@ from edx.stages.classifier.heuristics import (
     ReportingStandardWithOther,
     detect_report_form,
     detect_reporting_standard,
+    reporting_standard_for_type_code,
 )
 from edx.stages.classifier.pdf_inspector import (
     DEFAULT_MIN_TEXT_CHARS_PER_PAGE,
@@ -94,7 +95,11 @@ class ClassifierService:
         pdf_count = 0
         machine_readable = 0
         scan_count = 0
-        standards: dict[str, int] = {"IFRS": 0, "RSBU": 0, "OTHER": 0}
+        # Patch 21: ISSUER and ANNUAL join the counter; ``defaultdict``-like
+        # ``.get(..., 0)`` below handles unseen keys gracefully.
+        standards: dict[str, int] = {
+            "IFRS": 0, "RSBU": 0, "OTHER": 0, "ISSUER": 0, "ANNUAL": 0
+        }
 
         for doc in documents:
             if not _is_pdf(doc):
@@ -136,9 +141,40 @@ class ClassifierService:
                 text = extract_first_pages_text(
                     full_path, pages=self.first_pages_to_inspect
                 )
-                standard: ReportingStandardWithOther = detect_reporting_standard(
-                    text, self.metrics_config
+                # Patch 21: prefer the deterministic listing-URL type_code
+                # over text heuristics. The Discoverer attaches it on
+                # discovery (Patch 16); only legacy rows from before
+                # Patch 17 fall through to the text-based detector.
+                from_url = reporting_standard_for_type_code(
+                    pub.report_type_code
                 )
+                standard: ReportingStandardWithOther
+                if from_url is not None:
+                    standard = from_url
+                    heuristic = detect_reporting_standard(
+                        text, self.metrics_config
+                    )
+                    if (
+                        heuristic in ("IFRS", "RSBU")
+                        and standard in ("IFRS", "RSBU")
+                        and heuristic != standard
+                    ):
+                        # Operator wants to know if the file under "type=4
+                        # МСФО" has no IFRS markers (mis-filing on the
+                        # portal). type=2/5 are looser by design (annual
+                        # reports / issuer reports include MD&A text), so
+                        # we don't second-guess them.
+                        self._log.warning(
+                            "classifier_type_code_disagrees_with_text",
+                            publication_id=pub.publication_id,
+                            document_id=doc.document_id,
+                            from_type_code=standard,
+                            from_text=heuristic,
+                        )
+                else:
+                    standard = detect_reporting_standard(
+                        text, self.metrics_config
+                    )
                 form: ReportForm = detect_report_form(text)
             else:
                 scan_count += 1

@@ -724,3 +724,245 @@ async def test_ifrs_source_does_not_inject_rsbu_hint(
         conn.close()
 
     assert "1410+1510" not in captured["system"]
+
+
+# ---------------- Patch 21 — ISSUER as third-priority source -----------
+
+
+def _issuer_text_extract() -> dict[str, Any]:
+    """Synthetic Issuer Report-shaped text payload with a real section 1.4."""
+    return {
+        "extraction_method": "native",
+        "extracted_at": "2026-01-01T00:00:00+00:00",
+        "pages": [
+            {
+                "page_number": 1,
+                "text": (
+                    "Содержание\n"
+                    "1.4 Основные финансовые показатели ........... 10\n"
+                    "1.5 Дебиторская задолженность ............... 14\n"
+                ),
+            },
+            {
+                "page_number": 10,
+                "text": (
+                    "1.4. Основные финансовые показатели\n"
+                    "1.4.1 Чистый процентный доход — 1 309 млрд руб.\n"
+                    "1.4.2 Чистый комиссионный доход — 269 млрд руб.\n"
+                ),
+            },
+            {
+                "page_number": 14,
+                "text": (
+                    "1.5 Дебиторская задолженность\n"
+                    "Эта строка не должна попасть в trimmed slice.\n"
+                ),
+            },
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_issuer_chosen_when_no_ifrs_no_rsbu(
+    workspace: tuple[Database, Path, Path],
+) -> None:
+    """Patch 21: with only an ISSUER document available, MetricExtractor
+    picks it (3rd-priority source) and writes ``reporting_standard='ISSUER'``."""
+    db, raw_dir, processed_dir = workspace
+    pub_id = _seed_publication(
+        db,
+        pub_id="pub-issuer",
+        standards=["ISSUER"],
+        text_extracts=[_issuer_text_extract()],
+        raw_dir=raw_dir,
+        processed_dir=processed_dir,
+    )
+
+    def handler(req: LLMRequest) -> dict[str, Any]:
+        return {
+            "extractions": [
+                {
+                    "reporting_date": "2025-06-30",
+                    "period_type": "H1",
+                    "reporting_standard": "ISSUER",
+                    "currency": "RUB",
+                    "unit": "millions",
+                    "metrics": {
+                        "revenue": {"value": 100.0, "source_quote": "r"},
+                        "ebitda": {"value": 30.0, "source_quote": "e"},
+                        "net_income": {"value": 10.0, "source_quote": "ni"},
+                        "total_assets": {"value": 5000.0, "source_quote": "ta"},
+                        "total_debt": {"value": 2000.0, "source_quote": "td"},
+                    },
+                }
+            ]
+        }
+
+    llm = _FakeLLM(handler=handler)
+    service, conn = _build_service(db, raw_dir, processed_dir, llm)
+    try:
+        pub = PublicationsRepo(db, conn).get_by_id(pub_id)
+        assert pub is not None
+        outcomes = await service.run([pub])
+        rows = MetricsRepo(db, conn).list_for_publication(pub_id)
+    finally:
+        conn.close()
+
+    assert outcomes[0].rows_written == 5
+    # Patch 21 — storage accepts ISSUER directly, no RSBU fallback.
+    assert all(r.reporting_standard == "ISSUER" for r in rows)
+
+
+@pytest.mark.asyncio
+async def test_ifrs_beats_issuer_when_both_present(
+    workspace: tuple[Database, Path, Path],
+) -> None:
+    """3-tier priority: IFRS available → ISSUER skipped."""
+    db, raw_dir, processed_dir = workspace
+    pub_id = _seed_publication(
+        db,
+        pub_id="pub-mixed",
+        standards=["IFRS", "ISSUER"],
+        raw_dir=raw_dir,
+    )
+    llm = _FakeLLM(handler=lambda r: _full_extraction_payload())
+    service, conn = _build_service(db, raw_dir, processed_dir, llm)
+    try:
+        pub = PublicationsRepo(db, conn).get_by_id(pub_id)
+        assert pub is not None
+        await service.run([pub])
+        docs = DocumentsRepo(db, conn).list_for_publication(pub_id)
+    finally:
+        conn.close()
+
+    primary = [d for d in docs if d.is_primary_for_period == 1]
+    assert len(primary) == 1
+    assert primary[0].reporting_standard == "IFRS"
+
+
+@pytest.mark.asyncio
+async def test_rsbu_beats_issuer_when_both_present(
+    workspace: tuple[Database, Path, Path],
+) -> None:
+    """3-tier priority: ISSUER picked only when neither IFRS nor RSBU is there."""
+    db, raw_dir, processed_dir = workspace
+    pub_id = _seed_publication(
+        db,
+        pub_id="pub-rsbu-issuer",
+        standards=["RSBU", "ISSUER"],
+        raw_dir=raw_dir,
+    )
+    llm = _FakeLLM(
+        handler=lambda r: _full_extraction_payload(standard="RSBU")
+    )
+    service, conn = _build_service(db, raw_dir, processed_dir, llm)
+    try:
+        pub = PublicationsRepo(db, conn).get_by_id(pub_id)
+        assert pub is not None
+        await service.run([pub])
+        docs = DocumentsRepo(db, conn).list_for_publication(pub_id)
+    finally:
+        conn.close()
+
+    primary = [d for d in docs if d.is_primary_for_period == 1]
+    assert primary[0].reporting_standard == "RSBU"
+
+
+@pytest.mark.asyncio
+async def test_issuer_user_text_is_trimmed_to_section_1_4(
+    workspace: tuple[Database, Path, Path],
+) -> None:
+    """Patch 21: ISSUER user_text drops everything outside section 1.4."""
+    db, raw_dir, processed_dir = workspace
+    pub_id = _seed_publication(
+        db,
+        pub_id="pub-issuer-trim",
+        standards=["ISSUER"],
+        text_extracts=[_issuer_text_extract()],
+        raw_dir=raw_dir,
+        processed_dir=processed_dir,
+    )
+
+    captured: dict[str, str] = {}
+
+    def handler(req: LLMRequest) -> dict[str, Any]:
+        captured["user_text"] = req.user_text
+        captured["system"] = req.system
+        return {
+            "extractions": [
+                {
+                    "reporting_date": "2025-06-30",
+                    "period_type": "H1",
+                    "reporting_standard": "ISSUER",
+                    "currency": "RUB",
+                    "unit": "millions",
+                    "metrics": {
+                        "revenue": {"value": 1.0, "source_quote": "r"},
+                        "ebitda": {"value": 1.0, "source_quote": "e"},
+                        "net_income": {"value": 1.0, "source_quote": "ni"},
+                        "total_assets": {"value": 1.0, "source_quote": "ta"},
+                        "total_debt": {"value": 1.0, "source_quote": "td"},
+                    },
+                }
+            ]
+        }
+
+    llm = _FakeLLM(handler=handler)
+    service, conn = _build_service(db, raw_dir, processed_dir, llm)
+    try:
+        pub = PublicationsRepo(db, conn).get_by_id(pub_id)
+        assert pub is not None
+        await service.run([pub])
+    finally:
+        conn.close()
+
+    user_text = captured["user_text"]
+    # Section 1.4 content is present...
+    assert "1.4.1" in user_text
+    assert "Чистый процентный доход" in user_text
+    # ...and the next-section line ("Эта строка не должна попасть") is NOT.
+    assert "не должна попасть" not in user_text
+    # System prompt got the ISSUER nudge from _assemble_user_text caller.
+    assert "раздел 1.4" in user_text  # nudge sits inside user_text body
+
+
+@pytest.mark.asyncio
+async def test_issuer_falls_back_to_full_text_on_no_anchor(
+    workspace: tuple[Database, Path, Path],
+) -> None:
+    """If section 1.4 anchor is absent, the full document text is sent
+    (graceful degradation, with an issuer_trim warning logged)."""
+    db, raw_dir, processed_dir = workspace
+    extract = {
+        "extraction_method": "native",
+        "extracted_at": "2026-01-01T00:00:00+00:00",
+        "pages": [
+            {"page_number": 1, "text": "no section 1.4 anchor anywhere here"},
+        ],
+    }
+    pub_id = _seed_publication(
+        db,
+        pub_id="pub-no-anchor",
+        standards=["ISSUER"],
+        text_extracts=[extract],
+        raw_dir=raw_dir,
+        processed_dir=processed_dir,
+    )
+
+    captured: dict[str, str] = {}
+
+    def handler(req: LLMRequest) -> dict[str, Any]:
+        captured["user_text"] = req.user_text
+        return {"extractions": []}
+
+    llm = _FakeLLM(handler=handler)
+    service, conn = _build_service(db, raw_dir, processed_dir, llm)
+    try:
+        pub = PublicationsRepo(db, conn).get_by_id(pub_id)
+        assert pub is not None
+        await service.run([pub])
+    finally:
+        conn.close()
+
+    # Full text made it through (the only available content).
+    assert "no section 1.4 anchor anywhere here" in captured["user_text"]
