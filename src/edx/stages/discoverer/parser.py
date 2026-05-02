@@ -174,6 +174,25 @@ def parse_listing_page(
             continue
 
         period = parse_reporting_period(period_text, type_code=type_code)
+        if period is None:
+            # Patch 32: dedicated period cell empty or unrecognised — try
+            # the link's `title` attr and the type-label cell as fallback
+            # sources. e-disclosure routinely renders annual RSBU as
+            # `<a title="Бухгалтерская отчетность за 2025 год">FileLoad.ashx</a>`
+            # with the period column blank. Concatenating the link text,
+            # title, and type label and re-parsing is safe because the
+            # search-mode rules require the «за …» preposition.
+            link_text = (link.text(strip=True) if link is not None else "")
+            link_title = (
+                link.attributes.get("title") or "" if link is not None else ""
+            ).strip()
+            fallback_label = " ".join(
+                part for part in (link_text, link_title, type_label) if part
+            )
+            if fallback_label:
+                period = parse_reporting_period(
+                    fallback_label, type_code=type_code
+                )
         if period is None and period_text:
             result.warnings.append(
                 f"unrecognised reporting period {period_text!r} "

@@ -83,14 +83,29 @@ HTML-парсер ищет `table.files-table` (Patch 16). Каждая стро
   deterministic-источник `reporting_standard` (Patch 25 — даже для
   scan-only PDF);
 - `reporting_period_year` + `reporting_period_type` — извлекаются
-  из текста ссылки парсером в `period.py`. Понимаем формы:
-  - `"за 2024 год"` → FY 2024
-  - `"за 1 квартал 2025 года"` → Q1 2025
-  - `"за 1 полугодие 2025"` → H1 2025
-  - `"YYYY, 12 месяцев"` → FY (Patch 477dc1a)
-  - `"YYYY, N квартал"` → Q1..Q4 (Patch 477dc1a)
-  - 9M (девять месяцев) — отдельный enum, но на e-disclosure встречается
-    редко.
+  парсером в `period.py`. Год — любой 4-значный (year-agnostic, без
+  верхней/нижней границы); квартал — 1..4; полугодие — 1..2.
+  Источник входа — два прохода:
+
+  1. **Anchored full-match** на «Отчётный период» ячейке таблицы:
+     - `"YYYY"` (только год) → FY YYYY
+     - `"YYYY, 12 месяцев"` → FY YYYY (Patch 477dc1a)
+     - `"YYYY, 3/6/9 месяцев"` → Q1 / H1 / 9M
+     - `"YYYY, N квартал"` → Q1..Q4 (Patch 477dc1a)
+     - `"N квартал YYYY"` / `"I квартал YYYY"` → Q1..Q4
+     - `"N полугодие YYYY"` → H1, H2
+
+  2. **Search-mode** на свободном тексте — `<a>`-ссылка, `title`
+     attribute и type-label cell конкатенируются, если шаг 1 не дал
+     результата (Patch 32):
+     - `"за YYYY год"` / `"за YYYY г."` / `"за YYYY года"` → FY YYYY
+     - `"Бухгалтерская отчётность за YYYY"` → FY YYYY
+     - `"за N квартал YYYY года"` → Q1..Q4 YYYY
+     - `"за N полугодие YYYY"` → H1, H2 YYYY
+
+  Search-rules требуют префикс «за …» как анти-false-positive — иначе
+  любая случайная 4-значная цифра в свободном тексте угадывалась бы
+  как FY.
 
 Если страница `type=N` отдала 200 OK без `table.files-table`, в логах
 появляется `discoverer_no_publications_for_type` и Discoverer молча

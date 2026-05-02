@@ -118,3 +118,116 @@ def test_period_parser_covers_every_real_fixture_cell() -> None:
     assert {"Q1", "H1", "9M", "FY"} <= seen_period_types
     assert min(seen_years) <= 2010, "expected at least one 2010 or earlier"
     assert max(seen_years) >= 2026
+
+
+# ---------------------------------------------------------------------------
+# Patch 32: free-form label parsing (search-mode rules)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "year", [2009, 2015, 2018, 2023, 2026, 2030]
+)
+def test_short_fy_god_works_for_any_year(year: int) -> None:
+    parsed = parse_reporting_period(f"за {year} год", type_code=3)
+    assert parsed is not None
+    assert parsed.year == year
+    assert parsed.period_type == "FY"
+
+
+@pytest.mark.parametrize("year", [2010, 2024, 2030])
+def test_short_fy_g_dot_works_for_any_year(year: int) -> None:
+    parsed = parse_reporting_period(f"за {year} г.", type_code=3)
+    assert parsed is not None
+    assert parsed.year == year
+    assert parsed.period_type == "FY"
+
+
+@pytest.mark.parametrize("year", [2011, 2020, 2030])
+def test_fy_bare_label_works_for_any_year(year: int) -> None:
+    parsed = parse_reporting_period(
+        f"Бухгалтерская отчётность за {year}", type_code=3
+    )
+    assert parsed is not None
+    assert parsed.year == year
+    assert parsed.period_type == "FY"
+
+
+@pytest.mark.parametrize("q", [1, 2, 3, 4])
+@pytest.mark.parametrize("year", [2018, 2025, 2030])
+def test_q_full_works_for_every_quarter_and_year(q: int, year: int) -> None:
+    parsed = parse_reporting_period(
+        f"за {q} квартал {year} года", type_code=3
+    )
+    assert parsed is not None
+    assert parsed.year == year
+    assert parsed.period_type == f"Q{q}"
+
+
+@pytest.mark.parametrize("h", [1, 2])
+@pytest.mark.parametrize("year", [2015, 2025, 2030])
+def test_h_full_works_for_every_half_and_year(h: int, year: int) -> None:
+    parsed = parse_reporting_period(
+        f"за {h} полугодие {year}", type_code=3
+    )
+    assert parsed is not None
+    assert parsed.year == year
+    assert parsed.period_type == f"H{h}"
+
+
+def test_existing_yyyy_12_months_still_parses() -> None:
+    parsed = parse_reporting_period("2025, 12 месяцев", type_code=5)
+    assert parsed is not None
+    assert (parsed.year, parsed.period_type) == (2025, "FY")
+
+
+def test_existing_yyyy_n_quartal_still_parses() -> None:
+    parsed = parse_reporting_period("2025, 1 квартал", type_code=5)
+    assert parsed is not None
+    assert (parsed.year, parsed.period_type) == (2025, "Q1")
+
+
+def test_old_long_form_still_parses() -> None:
+    parsed = parse_reporting_period("1 квартал 2025", type_code=3)
+    assert parsed is not None
+    assert (parsed.year, parsed.period_type) == (2025, "Q1")
+
+
+def test_no_match_returns_none() -> None:
+    assert parse_reporting_period("Документы для общего собрания", type_code=2) is None
+
+
+def test_bare_year_without_modifier_does_not_match() -> None:
+    # "2025" alone matches via _RULES (FY) — that is desirable for the
+    # "Отчётный период" cell. But "Информация о компании 2025" must NOT
+    # be interpreted as FY: there's no «за», no «год», no quarter/half
+    # marker — it's a free-form sentence with a stray year.
+    assert (
+        parse_reporting_period("Информация о компании 2025", type_code=3)
+        is None
+    )
+
+
+def test_year_inside_iso_date_does_not_false_match() -> None:
+    """Date ranges should not be picked up as FY/Quarter via search rules."""
+    # No «за … год», no quarter/half — this must not match.
+    parsed = parse_reporting_period(
+        "период с 01.01.2025 по 31.03.2025", type_code=3
+    )
+    assert parsed is None
+
+
+def test_word_boundary_after_year_no_false_match() -> None:
+    """A 4-digit run inside a longer digit sequence must not match."""
+    assert parse_reporting_period("за 20251231", type_code=3) is None
+
+
+def test_year_outside_realistic_range_still_parses_no_validation() -> None:
+    """Patch 32 doesn't validate year ranges — that's the Validator's
+    job. A regex can't grow magic windows out of paranoia, otherwise it
+    breaks in 2030 without a code change.
+    """
+    parsed = parse_reporting_period("за 1850 год", type_code=3)
+    assert parsed is not None
+    assert parsed.year == 1850
+    assert parsed.period_type == "FY"

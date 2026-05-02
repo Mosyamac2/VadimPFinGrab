@@ -158,6 +158,62 @@ def test_parser_skips_row_without_file_link_with_warning() -> None:
     assert any("file link" in w for w in result.warnings)
 
 
+@pytest.mark.parametrize("year", [2018, 2025, 2030])
+def test_period_falls_back_to_title_attr(year: int) -> None:
+    """Patch 32: when the dedicated period cell is empty, the parser
+    should look at the link's `title` attribute and the type-label cell.
+    Year-/quarter-agnostic — tested across a year range.
+    """
+    html = (
+        "<html><body><table class='files-table'><tbody>"
+        "<tr><th>№</th><th>Т</th><th>П</th><th>Д1</th><th>Д2</th><th>Ф</th><th></th></tr>"
+        "<tr>"
+        "<td class='row-number-cell'>1</td>"
+        "<td class='type-cell'>Годовая бухгалтерская отчётность (все формы)</td>"
+        "<td></td>"  # period cell empty — typical CHMF-3-1913112 case
+        "<td class='date-cell'>27.02.2026</td>"
+        "<td class='date-cell'>28.02.2026</td>"
+        f"<td class='file-cell'><a class='file-link' href='https://x' "
+        f"data-fileid='999' title='за {year} год'>FileLoad.ashx</a></td>"
+        "<td class='cert-cell'></td>"
+        "</tr></tbody></table></body></html>"
+    )
+    result = parse_listing_page(
+        html, base_url=BASE_URL, ticker="X", type_code=3
+    )
+    assert len(result.publications) == 1
+    pub = result.publications[0]
+    assert pub.reporting_period_year == year
+    assert pub.reporting_period_type == "FY"
+
+
+def test_period_combines_link_text_and_title() -> None:
+    """Empty period cell, link text without period, but title carries it."""
+    html = (
+        "<html><body><table class='files-table'><tbody>"
+        "<tr><th>№</th><th>Т</th><th>П</th><th>Д1</th><th>Д2</th><th>Ф</th><th></th></tr>"
+        "<tr>"
+        "<td class='row-number-cell'>1</td>"
+        "<td class='type-cell'>Промежуточная бухгалтерская отчётность</td>"
+        "<td></td>"
+        "<td class='date-cell'>27.04.2026</td>"
+        "<td class='date-cell'>28.04.2026</td>"
+        "<td class='file-cell'><a class='file-link' href='https://x' "
+        "data-fileid='1000' title='за 1 квартал 2026 года'>FileLoad.ashx</a></td>"
+        "<td class='cert-cell'></td>"
+        "</tr></tbody></table></body></html>"
+    )
+    result = parse_listing_page(
+        html, base_url=BASE_URL, ticker="X", type_code=3
+    )
+    assert len(result.publications) == 1
+    pub = result.publications[0]
+    assert (pub.reporting_period_year, pub.reporting_period_type) == (
+        2026,
+        "Q1",
+    )
+
+
 def test_parser_warns_on_unrecognised_period() -> None:
     html = (
         "<html><body><table class='files-table'><tbody>"
