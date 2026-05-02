@@ -1,0 +1,90 @@
+# Template for config/metrics.yaml — copy to metrics.yaml and edit.
+#
+# Patch 19 split the catalogue into two profiles, ``non_bank`` and
+# ``bank``, because banks and corporates publish almost disjoint
+# headline metrics. The Metric Extractor picks the profile by the
+# ``profile`` field on the ticker (config/tickers.yaml). When you add a
+# new bank to tickers.yaml, set ``profile: bank`` — otherwise the
+# pipeline scores it against the corporate metric set, every cell comes
+# back empty, and the Validator marks every publication is_incomplete=1
+# for a config-design problem rather than a real data gap.
+#
+# Conventions:
+# - Each synonym must be backed by a real fixture under
+#   ``tests/fixtures/pdf/`` (ticker + file + page in the inline comment).
+#   "General knowledge" synonyms get rejected on review.
+# - ``only_in_sources`` opts a metric out of standards where it cannot
+#   exist (EBITDA isn't published in RSBU). The extractor strips the
+#   metric from the LLM prompt and the Validator excludes it from
+#   completeness for that source.
+# - ``aggregation_hint`` is a free-form note injected into the LLM
+#   prompt only when the source is RSBU (e.g. "total_debt = 1410 + 1510"
+#   on the balance sheet).
+
+profiles:
+  non_bank:
+    metrics:
+      revenue:
+        synonyms:
+          - Выручка                          # пример: LKOH РСБУ Q1 2026, стр. 4 (ОФР, 2110)
+          - Revenue
+          - Net sales
+        unit: RUB
+        scale_hints: [млн руб., тыс. руб., млрд руб.]
+      ebitda:
+        synonyms:
+          - EBITDA
+          - Adjusted EBITDA
+        unit: RUB
+        only_in_sources: [IFRS, ISSUER]      # RSBU не публикует EBITDA напрямую
+      net_income:
+        synonyms:
+          - Чистая прибыль
+          - Чистая прибыль (убыток)
+          - Net income
+        unit: RUB
+      total_assets:
+        synonyms:
+          - Итого активы
+          - Total assets
+        unit: RUB
+      total_debt:
+        synonyms:
+          - Заемные средства                 # сумма строк 1410 + 1510 в РСБУ
+          - Заёмные средства
+          - Total debt
+        unit: RUB
+        aggregation_hint: "В РСБУ это сумма строк 1410 (долгосрочные) + 1510 (краткосрочные). Если строки даны раздельно — суммируй обе."
+    reporting_priority: [IFRS, RSBU, ISSUER]   # ANNUAL (type=2) — metadata-only
+
+  bank:
+    metrics:
+      net_interest_income:
+        synonyms:
+          - Чистые процентные доходы         # пример: VTB GO 2024 стр. 11, 29
+          - Чистый процентный доход          # SBER МСФО (ед.ч.)
+          - Net interest income
+        unit: RUB
+      net_fee_income:
+        synonyms:
+          - Чистые комиссионные доходы       # пример: VTB GO 2024 стр. 11, 29
+          - Чистый комиссионный доход
+          - Net fee and commission income
+        unit: RUB
+      net_income:
+        synonyms:
+          - Чистая прибыль
+          - Net income
+        unit: RUB
+      total_assets:
+        synonyms:
+          - Итого активы
+          - Total assets
+        unit: RUB
+      total_equity:
+        synonyms:
+          - Итого собственный капитал
+          - Total equity
+          - Капитал акционеров
+        unit: RUB
+    reporting_priority: [IFRS, RSBU, ISSUER]

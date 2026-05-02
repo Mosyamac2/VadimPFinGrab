@@ -59,8 +59,15 @@ unpacker:
   max_unpacked_mb: 500
 
 classifier:
-  # PDFs whose first N pages contain fewer than this many characters of text
-  # are treated as scans and routed to OCR by the Text Extractor.
+  # Patch 18 — primary knob: a PDF page is classified as "text" when it
+  # carries at least this many non-whitespace characters; below — "scan",
+  # routed to OCR by the Text Extractor on a per-page basis. Banking RSBU
+  # documents typically have text pages 1-4 and scanned regulator forms
+  # 5-17 — the per-page split keeps the text half intact while OCR-ing
+  # only the scanned half.
+  min_text_chars_per_page: 50
+  # Deprecated by Patch 18; kept loadable for back-compat with older
+  # app.yaml files. Not consulted by the Classifier any more.
   min_text_chars: 400
   first_pages_to_inspect: 3
 
@@ -73,6 +80,11 @@ text_extractor:
   # Lines that recur on at least this many pages (case-sensitive after
   # normalisation) are stripped as headers/footers.
   header_footer_min_pages: 3
+  # Patch 21 — Issuer Reports (type=5) are 50–100 pages of MD&A with KPIs
+  # in section 1.4 only. The Metric Extractor trims to that section before
+  # LLM dispatch; this caps the final slice so even an un-anchored
+  # fallback can't blow the prompt budget.
+  issuer_trim_max_chars: 30000
 
 validator:
   # Publications below this metric-coverage ratio are flagged is_incomplete=1
