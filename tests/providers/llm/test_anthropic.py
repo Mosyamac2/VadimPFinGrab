@@ -273,6 +273,92 @@ async def test_one_hour_ttl_flows_into_cache_control(
     }
 
 
+# ---------------------------------------------------------------------------
+# Patch 33: pdf_page_indices slicing
+# ---------------------------------------------------------------------------
+
+
+def _make_multipage_pdf(num_pages: int) -> bytes:
+    import pymupdf
+
+    doc = pymupdf.open()  # type: ignore[no-untyped-call]
+    for _ in range(num_pages):
+        doc.new_page()  # type: ignore[no-untyped-call]
+    import io
+
+    buf = io.BytesIO()
+    doc.save(buf)  # type: ignore[no-untyped-call]
+    doc.close()  # type: ignore[no-untyped-call]
+    return buf.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_pdf_page_indices_slices_input(
+    request_factory: Callable[..., object],
+) -> None:
+    """pdf_page_indices=(1, 3) → Anthropic receives a 2-page PDF, not 5."""
+    captured: dict = {}
+
+    async def _fake_create(**kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return _success_response({"x": 1.0})
+
+    client = SimpleNamespace(
+        messages=SimpleNamespace(create=AsyncMock(side_effect=_fake_create))
+    )
+    provider = _make_provider(client)
+    pdf_bytes = _make_multipage_pdf(5)
+    req = request_factory(pdf_bytes=pdf_bytes, pdf_page_indices=(1, 3))
+    await provider.complete(req)  # type: ignore[arg-type]
+
+    user_content = captured["messages"][0]["content"]
+    document_blocks = [b for b in user_content if b["type"] == "document"]
+    assert len(document_blocks) == 1
+    import base64 as _b64
+
+    import pymupdf as _pmu
+
+    sent_bytes = _b64.b64decode(document_blocks[0]["source"]["data"])
+    sent_doc = _pmu.open(stream=sent_bytes, filetype="pdf")  # type: ignore[no-untyped-call]
+    try:
+        assert sent_doc.page_count == 2
+    finally:
+        sent_doc.close()  # type: ignore[no-untyped-call]
+
+
+@pytest.mark.asyncio
+async def test_pdf_page_indices_none_passes_full_pdf(
+    request_factory: Callable[..., object],
+) -> None:
+    """pdf_page_indices=None → whole PDF goes through (legacy behaviour)."""
+    captured: dict = {}
+
+    async def _fake_create(**kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return _success_response({"x": 1.0})
+
+    client = SimpleNamespace(
+        messages=SimpleNamespace(create=AsyncMock(side_effect=_fake_create))
+    )
+    provider = _make_provider(client)
+    pdf_bytes = _make_multipage_pdf(5)
+    req = request_factory(pdf_bytes=pdf_bytes)  # no indices
+    await provider.complete(req)  # type: ignore[arg-type]
+
+    user_content = captured["messages"][0]["content"]
+    document_blocks = [b for b in user_content if b["type"] == "document"]
+    import base64 as _b64
+
+    import pymupdf as _pmu
+
+    sent_bytes = _b64.b64decode(document_blocks[0]["source"]["data"])
+    sent_doc = _pmu.open(stream=sent_bytes, filetype="pdf")  # type: ignore[no-untyped-call]
+    try:
+        assert sent_doc.page_count == 5  # whole document
+    finally:
+        sent_doc.close()  # type: ignore[no-untyped-call]
+
+
 @pytest.mark.asyncio
 async def test_caching_disabled_omits_cache_control_block(
     request_factory: Callable[..., object],

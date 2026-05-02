@@ -176,6 +176,16 @@ class MetricExtractorConfig(BaseModel):
     # real Russian issuer; raise only if the LLM complains the section
     # was cut mid-form.
     balance_trim_max_chars: int = Field(default=200_000, gt=0)
+    # Patch 33: opt-in vision-fallback. When the first text-pass leaves
+    # coverage below ``vision_fallback_threshold`` and the document has
+    # scan pages, retry once with the LLM provider's native PDF input
+    # pointed at *only* the scan pages. Default off — switch on after
+    # a baseline run shows residual coverage to recover.
+    vision_fallback_enabled: bool = False
+    vision_fallback_threshold: float = Field(
+        default=0.5, ge=0.0, le=1.0
+    )
+    vision_fallback_max_pages: int = Field(default=12, ge=1, le=50)
 
 
 class TextExtractorConfig(BaseModel):

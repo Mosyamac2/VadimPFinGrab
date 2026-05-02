@@ -115,6 +115,16 @@ metric_extractor:
   # bulkiest combined form set; raise only if the LLM complains the
   # section was cut mid-form.
   balance_trim_max_chars: 200000
+  # Patch 33: opt-in vision-fallback. If the first text-pass leaves a
+  # publication below vision_fallback_threshold and the doc has scan
+  # pages, retry once with Anthropic native PDF pointed at *only* the
+  # scan slice (pdf_page_indices). Costs ~1500 tokens per scan page;
+  # capped by vision_fallback_max_pages. Default disabled — turn on
+  # only after Patches 29-32 land and a baseline shows residual
+  # coverage to recover.
+  vision_fallback_enabled: false
+  vision_fallback_threshold: 0.5
+  vision_fallback_max_pages: 12
 
 validator:
   # Publications below this metric-coverage ratio are flagged is_incomplete=1

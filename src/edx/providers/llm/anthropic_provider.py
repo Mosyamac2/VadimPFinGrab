@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import base64
+import io
 import time
 from typing import Any
 
 import anthropic
+import pymupdf
 from tenacity import (
     AsyncRetrying,
     retry_if_exception_type,
@@ -216,13 +218,22 @@ class AnthropicLLMProvider:
     def _build_user_content(self, req: LLMRequest) -> list[dict[str, Any]]:
         content: list[dict[str, Any]] = []
         if req.pdf_bytes is not None:
+            # Patch 33: when ``pdf_page_indices`` is set we slice the PDF
+            # down to those zero-based pages before base64-encoding —
+            # Anthropic vision is much more reliable on a 5-page slice
+            # than on a 36-page document with 30 scan pages.
+            payload = (
+                _slice_pdf_pages(req.pdf_bytes, req.pdf_page_indices)
+                if req.pdf_page_indices
+                else req.pdf_bytes
+            )
             content.append(
                 {
                     "type": "document",
                     "source": {
                         "type": "base64",
                         "media_type": "application/pdf",
-                        "data": base64.b64encode(req.pdf_bytes).decode("ascii"),
+                        "data": base64.b64encode(payload).decode("ascii"),
                     },
                 }
             )
@@ -252,3 +263,26 @@ def _safe_repr(data: Any) -> str:
         return json.dumps(data, ensure_ascii=False)
     except (TypeError, ValueError):
         return repr(data)
+
+
+def _slice_pdf_pages(pdf_bytes: bytes, indices: tuple[int, ...]) -> bytes:
+    """Return a new PDF containing only ``indices`` (0-based) from ``pdf_bytes``.
+
+    Out-of-range indices are silently dropped — the Metric Extractor
+    derives them from ``documents.pages_classification`` so they should
+    always be valid, but we don't want a single classifier glitch to
+    blow up the whole vision-fallback path.
+    """
+    src = pymupdf.open(stream=pdf_bytes, filetype="pdf")  # type: ignore[no-untyped-call]
+    dst = pymupdf.open()  # type: ignore[no-untyped-call]
+    try:
+        page_count = src.page_count
+        for idx in indices:
+            if 0 <= idx < page_count:
+                dst.insert_pdf(src, from_page=idx, to_page=idx)  # type: ignore[no-untyped-call]
+        out = io.BytesIO()
+        dst.save(out)  # type: ignore[no-untyped-call]
+        return out.getvalue()
+    finally:
+        dst.close()  # type: ignore[no-untyped-call]
+        src.close()  # type: ignore[no-untyped-call]

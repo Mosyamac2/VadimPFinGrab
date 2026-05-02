@@ -97,6 +97,15 @@ class MetricExtractorService:
         # any real Russian issuer; raise only if the LLM complains the
         # section was cut mid-form.
         balance_trim_max_chars: int = 200_000,
+        # Patch 33: opt-in vision-fallback. When the first text-pass
+        # yields ``coverage_ratio < vision_fallback_threshold`` and the
+        # primary document has scan pages, retry once with the LLM
+        # provider's native PDF input pointed at *only* the scan pages.
+        # Default off — switch on only after Patches 29-32 land and a
+        # baseline run shows there is residual coverage to recover.
+        vision_fallback_enabled: bool = False,
+        vision_fallback_threshold: float = 0.5,
+        vision_fallback_max_pages: int = 12,
     ) -> None:
         self.llm_provider = llm_provider
         self.publications_repo = publications_repo
@@ -113,6 +122,9 @@ class MetricExtractorService:
         self.scan_ratio_threshold = scan_ratio_threshold
         self.pdf_input_standards = tuple(pdf_input_standards)
         self.balance_trim_max_chars = balance_trim_max_chars
+        self.vision_fallback_enabled = vision_fallback_enabled
+        self.vision_fallback_threshold = vision_fallback_threshold
+        self.vision_fallback_max_pages = vision_fallback_max_pages
         # Cache prompt+schema per (profile, source_standard). At most
         # 2 profiles × 3 standards = 6 entries.
         self._prompt_cache: dict[tuple[str, str], str] = {}
@@ -241,6 +253,88 @@ class MetricExtractorService:
         rows, extracted_count, requested_count = self._build_metric_rows(
             pub, primary_doc, result, profile, applicable_metrics
         )
+
+        # Patch 33: vision-fallback retry. If the first pass left this
+        # publication well below the completeness target *and* the doc
+        # has scan pages we can point Anthropic at, run a second LLM
+        # call with only the scan slice as native PDF and merge the
+        # extractions. Default off — opt-in via vision_fallback_enabled.
+        coverage_pre_fallback = (
+            extracted_count / requested_count if requested_count else 0.0
+        )
+        scan_pages_count = primary_doc.scan_pages_count or 0
+        primary_full_path = (
+            self.raw_dir
+            / pub.ticker
+            / pub.publication_id
+            / primary_doc.relative_path
+        )
+        if (
+            self.vision_fallback_enabled
+            and coverage_pre_fallback < self.vision_fallback_threshold
+            and scan_pages_count > 0
+            and self.llm_provider.supports_pdf_input
+            and primary_full_path.is_file()
+        ):
+            scan_indices = self._extract_scan_indices(primary_doc)
+            if scan_indices:
+                capped = scan_indices[: self.vision_fallback_max_pages]
+                self._log.info(
+                    "metric_extract_vision_fallback_triggered",
+                    publication_id=pub.publication_id,
+                    primary_coverage=round(coverage_pre_fallback, 3),
+                    scan_pages_total=len(scan_indices),
+                    scan_pages_sent=len(capped),
+                )
+                vision_request = LLMRequest(
+                    system=self._prompt_for(profile_name, chosen_standard),
+                    user_text=(
+                        f"Эмитент: {pub.ticker} (профиль {profile_name}). "
+                        f"Стандарт: {chosen_standard}. Это сканированные "
+                        "страницы с формами отчётности. Извлеки финансовые "
+                        "показатели только из этих страниц."
+                    ),
+                    pdf_bytes=primary_full_path.read_bytes(),
+                    pdf_page_indices=tuple(capped),
+                    json_schema=self._schema_for(
+                        profile_name, chosen_standard
+                    ),
+                    max_tokens=self.max_tokens,
+                    temperature=self.temperature,
+                    schema_name="extract_metrics",
+                    schema_description=(
+                        "Структурированные финансовые показатели по периодам"
+                    ),
+                )
+                vision_response = await self.llm_provider.complete(
+                    vision_request
+                )
+                vision_result = MetricExtractionResult.model_validate(
+                    vision_response.data
+                )
+                merged = MetricExtractionResult(
+                    extractions=list(result.extractions)
+                    + list(vision_result.extractions)
+                )
+                rows, extracted_count, requested_count = (
+                    self._build_metric_rows(
+                        pub, primary_doc, merged, profile, applicable_metrics
+                    )
+                )
+                coverage_post = (
+                    extracted_count / requested_count
+                    if requested_count
+                    else 0.0
+                )
+                self._log.info(
+                    "metric_extract_vision_fallback_completed",
+                    publication_id=pub.publication_id,
+                    coverage_before=round(coverage_pre_fallback, 3),
+                    coverage_after=round(coverage_post, 3),
+                    vision_input_tokens=vision_response.input_tokens,
+                    vision_output_tokens=vision_response.output_tokens,
+                )
+
         self.metrics_repo.replace_for_publication(pub.publication_id, rows)
         self.documents_repo.set_primary_for_publication(
             pub.publication_id, primary_doc.document_id
@@ -303,6 +397,28 @@ class MetricExtractorService:
             if chosen:
                 return chosen, standard
         return [], None
+
+    def _extract_scan_indices(self, doc: DocumentRow) -> list[int]:
+        """Pull 0-based scan-page indices from documents.pages_classification.
+
+        Returns ``[]`` when the document was classified before Patch 18 and
+        the JSON column is empty — vision-fallback then has nothing to
+        target and the caller skips the retry.
+        """
+        raw = doc.pages_classification
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+        return [
+            int(entry["page"])
+            for entry in parsed
+            if isinstance(entry, dict)
+            and entry.get("kind") == "scan"
+            and "page" in entry
+        ]
 
     def _applicable_metric_names(
         self, profile: MetricsProfile, source_standard: ReportingStandard

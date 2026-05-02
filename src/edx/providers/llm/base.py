@@ -15,6 +15,12 @@ class LLMRequest(BaseModel):
     system: str
     user_text: str
     pdf_bytes: bytes | None = None
+    # Patch 33: when non-null, the provider must send only these
+    # zero-based pages from ``pdf_bytes``. Other pages are dropped.
+    # ``None`` keeps the legacy "send the whole document" behaviour.
+    # Used by the Metric Extractor's vision-fallback retry to point
+    # Anthropic at just the scan pages instead of the whole report.
+    pdf_page_indices: tuple[int, ...] | None = None
     json_schema: dict[str, Any]
     max_tokens: int = Field(gt=0)
     temperature: float = Field(ge=0.0, le=2.0)
