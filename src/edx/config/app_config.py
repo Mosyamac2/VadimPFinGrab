@@ -186,6 +186,15 @@ class MetricExtractorConfig(BaseModel):
         default=0.5, ge=0.0, le=1.0
     )
     vision_fallback_max_pages: int = Field(default=12, ge=1, le=50)
+    # Patch 34: emergency-stop for the per-ticker full-vision path.
+    # When ``True``, the ``tickers.use_vision_extraction`` flag is
+    # ignored and every ticker goes through the standard text/PDF
+    # routing. Useful if vision tokens start running away unexpectedly.
+    vision_only_global_disabled: bool = False
+    # Patch 34: hard cap on page images per request when an issuer is
+    # opted in to vision-only. Anthropic accepts up to 100 images per
+    # call but charges per page; we keep the default conservative.
+    vision_only_max_pages_per_request: int = Field(default=25, ge=1, le=100)
 
 
 class TextExtractorConfig(BaseModel):

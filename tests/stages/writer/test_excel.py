@@ -80,6 +80,7 @@ def _snapshot() -> WitrineSnapshot:
                 name="Lukoil",
                 profile="non_bank",
                 e_disclosure_id="17",
+                use_vision_extraction=True,  # Patch 34: surfaced in Excel
             ),
         ],
         meta=MetaSnapshot(
@@ -109,12 +110,25 @@ def test_excel_writer_round_trips_all_sheets(tmp_path: Path) -> None:
     }
     tickers = wb["tickers"]
     headers = [c.value for c in tickers[1]]
-    assert headers == ["ticker", "name", "profile", "e_disclosure_id"]
+    # Patch 34: tickers sheet now carries the use_vision_extraction column.
+    assert headers == [
+        "ticker",
+        "name",
+        "profile",
+        "e_disclosure_id",
+        "use_vision_extraction",
+    ]
     profiles = {
         tickers.cell(row=r, column=1).value: tickers.cell(row=r, column=3).value
         for r in range(2, tickers.max_row + 1)
     }
     assert profiles == {"SBER": "bank", "LKOH": "non_bank"}
+    # Patch 34: column 5 = use_vision_extraction. SBER default False, LKOH True.
+    vision_flags = {
+        tickers.cell(row=r, column=1).value: tickers.cell(row=r, column=5).value
+        for r in range(2, tickers.max_row + 1)
+    }
+    assert vision_flags == {"SBER": False, "LKOH": True}
 
 
 def test_metrics_sheet_headers_and_values(tmp_path: Path) -> None:

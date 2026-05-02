@@ -217,7 +217,23 @@ class AnthropicLLMProvider:
 
     def _build_user_content(self, req: LLMRequest) -> list[dict[str, Any]]:
         content: list[dict[str, Any]] = []
-        if req.pdf_bytes is not None:
+        # Patch 34: pre-rendered page images take precedence over
+        # pdf_bytes — explicit opt-in for the full-vision-only path.
+        if req.pdf_page_images:
+            for image_bytes in req.pdf_page_images:
+                content.append(
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": base64.b64encode(image_bytes).decode(
+                                "ascii"
+                            ),
+                        },
+                    }
+                )
+        elif req.pdf_bytes is not None:
             # Patch 33: when ``pdf_page_indices`` is set we slice the PDF
             # down to those zero-based pages before base64-encoding —
             # Anthropic vision is much more reliable on a 5-page slice

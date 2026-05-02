@@ -106,6 +106,13 @@ class MetricExtractorService:
         vision_fallback_enabled: bool = False,
         vision_fallback_threshold: float = 0.5,
         vision_fallback_max_pages: int = 12,
+        # Patch 34: kill switch that overrides per-ticker vision-only
+        # opt-in (TickerEntry.use_vision_extraction). When True, every
+        # ticker goes through the standard text/PDF routing — useful as
+        # an emergency stop without touching tickers.yaml.
+        vision_only_global_disabled: bool = False,
+        # Patch 34: page cap when an issuer is opted in to vision-only.
+        vision_only_max_pages_per_request: int = 25,
     ) -> None:
         self.llm_provider = llm_provider
         self.publications_repo = publications_repo
@@ -125,6 +132,10 @@ class MetricExtractorService:
         self.vision_fallback_enabled = vision_fallback_enabled
         self.vision_fallback_threshold = vision_fallback_threshold
         self.vision_fallback_max_pages = vision_fallback_max_pages
+        self.vision_only_global_disabled = vision_only_global_disabled
+        self.vision_only_max_pages_per_request = (
+            vision_only_max_pages_per_request
+        )
         # Cache prompt+schema per (profile, source_standard). At most
         # 2 profiles × 3 standards = 6 entries.
         self._prompt_cache: dict[tuple[str, str], str] = {}
@@ -398,6 +409,64 @@ class MetricExtractorService:
                 return chosen, standard
         return [], None
 
+    def _build_vision_only_request(
+        self,
+        pub: PublicationRow,
+        profile_name: str,
+        primary_doc: DocumentRow,
+        full_path: Path,
+        standard: ReportingStandard,
+    ) -> LLMRequest:
+        """Patch 34: render every page of the primary document as PNG and
+        ship as Anthropic image content blocks. Capped at
+        ``vision_only_max_pages_per_request``.
+        """
+        import io
+
+        import pymupdf
+
+        src = pymupdf.open(str(full_path))  # type: ignore[no-untyped-call]
+        try:
+            cap = min(self.vision_only_max_pages_per_request, src.page_count)
+            images: list[bytes] = []
+            for index in range(cap):
+                page = src.load_page(index)  # type: ignore[no-untyped-call]
+                pixmap = page.get_pixmap(dpi=200)
+                buf = io.BytesIO()
+                buf.write(pixmap.tobytes("png"))
+                images.append(buf.getvalue())
+        finally:
+            src.close()  # type: ignore[no-untyped-call]
+
+        self._log.info(
+            "metric_extract_vision_only_request",
+            publication_id=pub.publication_id,
+            ticker=pub.ticker,
+            standard=standard,
+            pages_total=primary_doc.page_count,
+            pages_rendered=len(images),
+        )
+        return LLMRequest(
+            system=self._prompt_for(profile_name, standard),
+            user_text=(
+                f"Эмитент: {pub.ticker} (профиль {profile_name}). "
+                f"Стандарт: {standard}. Перед тобой изображения каждой "
+                "страницы документа. Извлекай числа только из форм "
+                "отчётности; аудиторские пояснения и подписи в KPI не "
+                "включай."
+            ),
+            pdf_bytes=None,
+            pdf_page_indices=None,
+            pdf_page_images=tuple(images),
+            json_schema=self._schema_for(profile_name, standard),
+            max_tokens=self.max_tokens,
+            temperature=self.temperature,
+            schema_name="extract_metrics",
+            schema_description=(
+                "Структурированные финансовые показатели по периодам"
+            ),
+        )
+
     def _extract_scan_indices(self, doc: DocumentRow) -> list[int]:
         """Pull 0-based scan-page indices from documents.pages_classification.
 
@@ -472,6 +541,24 @@ class MetricExtractorService:
         full_path = (
             self.raw_dir / pub.ticker / pub.publication_id / primary_doc.relative_path
         )
+
+        # Patch 34: per-ticker full-vision opt-in. RSBU / ISSUER for the
+        # flagged issuer ship every page as a PNG image content block
+        # instead of running through the standard text or native-PDF
+        # paths. IFRS for the same ticker stays on the standard route
+        # (it works there). Globally killable via app.yaml.
+        if (
+            ticker_entry is not None
+            and ticker_entry.use_vision_extraction
+            and not self.vision_only_global_disabled
+            and standard in ("RSBU", "ISSUER")
+            and self.llm_provider.supports_pdf_input
+            and len(chosen) == 1
+            and full_path.is_file()
+        ):
+            return self._build_vision_only_request(
+                pub, profile_name, primary_doc, full_path, standard
+            )
 
         # Patch 29: routing into PDF vs text path is driven by two
         # configurable knobs:

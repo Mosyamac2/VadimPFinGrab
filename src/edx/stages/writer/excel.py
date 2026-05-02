@@ -72,12 +72,16 @@ class MetaSnapshot:
 @dataclass(frozen=True)
 class TickerExportRow:
     """Patch 19: emitted on the ``tickers`` sheet so analysts can see which
-    metric set each issuer was scored against."""
+    metric set each issuer was scored against. Patch 34: extra column
+    ``use_vision_extraction`` flags issuers routed through the vision-only
+    path so the cost driver is visible at a glance.
+    """
 
     ticker: str
     name: str
     profile: str  # bank | non_bank
     e_disclosure_id: str
+    use_vision_extraction: bool = False
 
 
 @dataclass(frozen=True)
@@ -122,6 +126,7 @@ TICKERS_HEADERS: Final[tuple[str, ...]] = (
     "name",
     "profile",
     "e_disclosure_id",
+    "use_vision_extraction",
 )
 
 
@@ -220,6 +225,7 @@ class ExcelWriter:
             ws.cell(row=row_idx, column=2, value=row.name)
             ws.cell(row=row_idx, column=3, value=row.profile)
             ws.cell(row=row_idx, column=4, value=row.e_disclosure_id)
+            ws.cell(row=row_idx, column=5, value=row.use_vision_extraction)
         _finalise_sheet(ws)
 
     def _write_qa_issues(

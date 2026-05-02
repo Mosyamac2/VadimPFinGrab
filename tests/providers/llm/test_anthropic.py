@@ -326,6 +326,73 @@ async def test_pdf_page_indices_slices_input(
         sent_doc.close()  # type: ignore[no-untyped-call]
 
 
+# ---------------------------------------------------------------------------
+# Patch 34: pdf_page_images → image content blocks
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pdf_page_images_emits_image_content_blocks(
+    request_factory: Callable[..., object],
+) -> None:
+    """Three PNG byte blobs → three image content blocks + one text block."""
+    captured: dict = {}
+
+    async def _fake_create(**kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return _success_response({"x": 1.0})
+
+    client = SimpleNamespace(
+        messages=SimpleNamespace(create=AsyncMock(side_effect=_fake_create))
+    )
+    provider = _make_provider(client)
+    fake_images = (
+        b"\x89PNG\x00\x00\x00page1",
+        b"\x89PNG\x00\x00\x00page2",
+        b"\x89PNG\x00\x00\x00page3",
+    )
+    req = request_factory(pdf_page_images=fake_images)
+    await provider.complete(req)  # type: ignore[arg-type]
+
+    user_content = captured["messages"][0]["content"]
+    image_blocks = [b for b in user_content if b["type"] == "image"]
+    text_blocks = [b for b in user_content if b["type"] == "text"]
+    assert len(image_blocks) == 3
+    assert len(text_blocks) == 1
+    for block, original in zip(image_blocks, fake_images, strict=True):
+        assert block["source"]["media_type"] == "image/png"
+        import base64 as _b64
+        assert _b64.b64decode(block["source"]["data"]) == original
+
+
+@pytest.mark.asyncio
+async def test_pdf_page_images_take_precedence_over_pdf_bytes(
+    request_factory: Callable[..., object],
+) -> None:
+    """Both pdf_bytes and pdf_page_images set → image wins, document dropped."""
+    captured: dict = {}
+
+    async def _fake_create(**kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return _success_response({"x": 1.0})
+
+    client = SimpleNamespace(
+        messages=SimpleNamespace(create=AsyncMock(side_effect=_fake_create))
+    )
+    provider = _make_provider(client)
+    pdf_bytes = _make_multipage_pdf(3)
+    req = request_factory(
+        pdf_bytes=pdf_bytes,
+        pdf_page_images=(b"\x89PNG fake",),
+    )
+    await provider.complete(req)  # type: ignore[arg-type]
+
+    user_content = captured["messages"][0]["content"]
+    types = {b["type"] for b in user_content}
+    assert "image" in types
+    assert "document" not in types
+
+
 @pytest.mark.asyncio
 async def test_pdf_page_indices_none_passes_full_pdf(
     request_factory: Callable[..., object],

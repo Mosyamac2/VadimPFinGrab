@@ -123,6 +123,7 @@ class WriterService:
                 name=entry.name,
                 profile=entry.profile,
                 e_disclosure_id=entry.e_disclosure_id,
+                use_vision_extraction=entry.use_vision_extraction,
             )
             for entry in self.tickers_config.tickers
         ]

@@ -21,6 +21,12 @@ class LLMRequest(BaseModel):
     # Used by the Metric Extractor's vision-fallback retry to point
     # Anthropic at just the scan pages instead of the whole report.
     pdf_page_indices: tuple[int, ...] | None = None
+    # Patch 34: pre-rendered page images (PNG bytes). When set, the
+    # provider must send each item as an Anthropic ``image`` content
+    # block in the same order. Takes precedence over ``pdf_bytes`` /
+    # ``pdf_page_indices`` — explicit per-ticker opt-in for the
+    # full-vision path on issuers where text + native PDF both fail.
+    pdf_page_images: tuple[bytes, ...] | None = None
     json_schema: dict[str, Any]
     max_tokens: int = Field(gt=0)
     temperature: float = Field(ge=0.0, le=2.0)

@@ -34,4 +34,6 @@ def build_metric_extractor_service(
         vision_fallback_enabled=settings.app.metric_extractor.vision_fallback_enabled,
         vision_fallback_threshold=settings.app.metric_extractor.vision_fallback_threshold,
         vision_fallback_max_pages=settings.app.metric_extractor.vision_fallback_max_pages,
+        vision_only_global_disabled=settings.app.metric_extractor.vision_only_global_disabled,
+        vision_only_max_pages_per_request=settings.app.metric_extractor.vision_only_max_pages_per_request,
     )

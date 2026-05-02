@@ -125,6 +125,13 @@ metric_extractor:
   vision_fallback_enabled: false
   vision_fallback_threshold: 0.5
   vision_fallback_max_pages: 12
+  # Patch 34: kill switch for the per-ticker full-vision path. When true,
+  # the tickers.use_vision_extraction flag is ignored and every ticker
+  # goes through the standard text/PDF routing. Useful as an emergency
+  # stop without touching tickers.yaml.
+  vision_only_global_disabled: false
+  # Patch 34: hard cap on page images per vision-only request.
+  vision_only_max_pages_per_request: 25
 
 validator:
   # Publications below this metric-coverage ratio are flagged is_incomplete=1

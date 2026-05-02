@@ -24,6 +24,16 @@ class TickerEntry(BaseModel):
     # explicitly (SBER, VTBR, BSPB, TCSG, MBNK, SVCB, …).
     profile: ProfileName = "non_bank"
     priority_override: list[ReportingPriority] | None = None
+    # Patch 34: opt-in per-ticker vision-only path. When true, the
+    # Metric Extractor renders every page of the ticker's RSBU /
+    # ISSUER documents to PNG and ships them as Anthropic image
+    # content blocks instead of the text/PDF channels. Costs ~1500
+    # vision-tokens per page — switch on only after Patches 29-33
+    # have been validated and a specific ticker still won't yield
+    # acceptable coverage. IFRS for the same ticker stays on the
+    # standard PDF path. Globally killable via
+    # app.metric_extractor.vision_only_global_disabled.
+    use_vision_extraction: bool = False
 
 
 class TickersConfig(BaseModel):
