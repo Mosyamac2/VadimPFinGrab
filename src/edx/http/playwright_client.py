@@ -96,7 +96,13 @@ class PlaywrightEDisclosureClient(EDisclosureClient):
         retry_max_wait_s: float = 10.0,
         respect_robots: bool = True,
         cookies: dict[str, str] | None = None,
-        bootstrap_path: str = "/",
+        # Bootstrap URL must be a *protected* page so ServicePipe actually
+        # serves the JS-challenge during the in-browser warm-up; the
+        # site's home (``/``) is unprotected and would leave the cookie
+        # jar empty. ``/portal/files.aspx?id=3043&type=4`` (SBER МСФО)
+        # works for every issuer because the challenge is tied to the
+        # ``/portal/...`` namespace, not the specific ``id``.
+        bootstrap_path: str = "/portal/files.aspx?id=3043&type=4",
     ) -> None:
         super().__init__(
             base_url=base_url,
@@ -121,6 +127,9 @@ class PlaywrightEDisclosureClient(EDisclosureClient):
         self._playwright: Any = None
         self._browser: Any = None
         self._context: Any = None
+        # Re-used across get() calls — opening/closing a page per request
+        # adds ~150 ms each and dwarfs the actual fetch.
+        self._page: Any = None
         self._log = get_logger("edx.http.playwright_client")
 
     async def __aenter__(self) -> PlaywrightEDisclosureClient:
@@ -169,20 +178,21 @@ class PlaywrightEDisclosureClient(EDisclosureClient):
                 ]
             )
 
-        # Bootstrap: open one page so any JS challenge runs in the
-        # browser and populates the context's cookie jar with values
-        # tied to Chromium's JA3. After this every context.request.*
-        # call replays those cookies on a Chromium-shaped TLS handshake.
-        page = await self._context.new_page()
+        # Bootstrap on a *protected* URL so the JS-challenge actually
+        # runs in the browser and populates the cookie jar. The home
+        # page (``/``) is unprotected and would leave us empty-handed.
+        # We reuse the same page object for every subsequent get() —
+        # ServicePipe re-serves the challenge on each new URL within
+        # the protected namespace, and only the browser can re-solve
+        # it; ``context.request`` (Playwright's HTTP client) doesn't
+        # execute JS, so it would loop on the challenge forever.
+        self._page = await self._context.new_page()
         bootstrap_url = self.base_url.rstrip("/") + self._bootstrap_path
-        try:
-            await page.goto(
-                bootstrap_url,
-                wait_until="networkidle",
-                timeout=self._request_timeout_ms,
-            )
-        finally:
-            await page.close()
+        await self._page.goto(
+            bootstrap_url,
+            wait_until="networkidle",
+            timeout=self._request_timeout_ms,
+        )
 
         if not self._desired_respect_robots:
             self._log.warning("robots_check_disabled")
@@ -203,6 +213,9 @@ class PlaywrightEDisclosureClient(EDisclosureClient):
         await self.close()
 
     async def close(self) -> None:
+        if self._page is not None:
+            await self._page.close()
+            self._page = None
         if self._context is not None:
             await self._context.close()
             self._context = None
@@ -214,35 +227,47 @@ class PlaywrightEDisclosureClient(EDisclosureClient):
             self._playwright = None
 
     async def get(self, url: str) -> _PlaywrightResponse:  # type: ignore[override]
+        """Fetch a protected page through the *browser*, not the HTTP
+        client — ServicePipe re-serves the JS-challenge on each new URL
+        in the ``/portal/...`` namespace, and only Chromium executes the
+        JS that sets the per-page cookies. We always read the post-JS
+        ``page.content()``, which is the same HTML a real user would
+        see in DevTools → Elements.
+        """
         full_url = url if url.startswith("http") else (
             self.base_url.rstrip("/") + url
         )
-        if self._context is None:
+        if self._page is None:
             raise RuntimeError(
                 "PlaywrightEDisclosureClient.get() called outside "
                 "an `async with` block — the browser isn't started"
             )
         async with self._limiter:
             t0 = time.monotonic()
-            response = await self._context.request.get(
-                full_url, timeout=self._request_timeout_ms
+            response = await self._page.goto(
+                full_url,
+                wait_until="networkidle",
+                timeout=self._request_timeout_ms,
             )
-            body = await response.body()
-            charset = response.headers.get("charset", "utf-8") or "utf-8"
-            text = body.decode(charset, errors="replace")
+            # ``response`` is None on same-document navigations; for our
+            # case (cross-URL navigations) it's always a Response object.
+            content = await self._page.content()
+            body = content.encode("utf-8")
             elapsed = time.monotonic() - t0
+        status = response.status if response is not None else 200
+        headers = dict(response.headers) if response is not None else {}
         self._log.info(
             "http_response",
             url=url,
-            status=response.status,
+            status=status,
             body_bytes=len(body),
             elapsed_s=round(elapsed, 4),
         )
         return _PlaywrightResponse(
-            status_code=response.status,
-            text=text,
+            status_code=status,
+            text=content,
             content=body,
-            headers=dict(response.headers),
+            headers=headers,
         )
 
     async def download(
