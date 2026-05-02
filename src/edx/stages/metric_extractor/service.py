@@ -434,15 +434,41 @@ class MetricExtractorService:
         profile: MetricsProfile,
         applicable_metrics: list[str],
     ) -> tuple[list[MetricInput], int, int]:
-        rows: list[MetricInput] = []
-        extracted_count = 0
-        requested_count = 0
-
         # Patch 21: storage now accepts ISSUER along with IFRS/RSBU (see
         # migration 0009 + the widened ``ReportingStandard`` Literal),
         # so the Patch-19 ISSUER→RSBU compatibility shim is gone — we
         # write ``period.reporting_standard`` straight through.
+        #
+        # Patch 26: dedup before flushing to the repo. The LLM occasionally
+        # emits two ``extractions`` entries with the same
+        # ``(reporting_date, period_type, reporting_standard)`` — typically
+        # a "current" period and a "comparative prior" period stamped with
+        # the same date stub, or two entries for the same period rendered
+        # twice in different sections of the document. The metrics table
+        # has a UNIQUE(ticker, reporting_date, period_type,
+        # reporting_standard, metric_name) constraint, and a naive
+        # bulk-insert raises IntegrityError, killing the publication.
+        # Strategy: keep one row per ``(date, period_type, std,
+        # metric_name)`` key — prefer the entry with a non-null ``value``;
+        # if both are non-null, the later one wins (LLM tends to put the
+        # most-recent period last).
+        deduped: dict[
+            tuple[str, str, str, str], MetricInput
+        ] = {}
+        seen_keys_per_period: dict[
+            tuple[str, str, str], int
+        ] = {}
+        requested_count = 0
+
         for period in result.extractions:
+            period_key = (
+                period.reporting_date,
+                period.period_type,
+                period.reporting_standard,
+            )
+            seen_keys_per_period[period_key] = (
+                seen_keys_per_period.get(period_key, 0) + 1
+            )
             for canonical in applicable_metrics:
                 requested_count += 1
                 spec = profile.metrics[canonical]
@@ -450,22 +476,43 @@ class MetricExtractorService:
                 normalized_value = normalize_value(
                     item.value, period.unit, TARGET_UNIT
                 )
-                if normalized_value is not None:
-                    extracted_count += 1
-                rows.append(
-                    MetricInput(
-                        ticker=pub.ticker,
-                        reporting_date=period.reporting_date,
-                        period_type=period.period_type,
-                        reporting_standard=period.reporting_standard,
-                        metric_name=canonical,
-                        value=normalized_value,
-                        currency=period.currency,
-                        unit=spec.unit,
-                        source_document_id=primary_doc.document_id,
-                        qa_warning=None,
-                    )
+                row = MetricInput(
+                    ticker=pub.ticker,
+                    reporting_date=period.reporting_date,
+                    period_type=period.period_type,
+                    reporting_standard=period.reporting_standard,
+                    metric_name=canonical,
+                    value=normalized_value,
+                    currency=period.currency,
+                    unit=spec.unit,
+                    source_document_id=primary_doc.document_id,
+                    qa_warning=None,
                 )
+                key = (*period_key, canonical)
+                existing = deduped.get(key)
+                if existing is None:
+                    deduped[key] = row
+                elif existing.value is None and row.value is not None:
+                    deduped[key] = row  # prefer non-null over null
+                elif existing.value is not None and row.value is not None:
+                    deduped[key] = row  # both filled — last one wins
+                # else: keep existing (both null, or new is null)
+
+        # If any period appeared more than once, log it so the operator
+        # can spot suspicious LLM output without digging through state.
+        for dup_key, count in seen_keys_per_period.items():
+            if count > 1:
+                self._log.warning(
+                    "metric_extract_duplicate_period",
+                    publication_id=pub.publication_id,
+                    reporting_date=dup_key[0],
+                    period_type=dup_key[1],
+                    reporting_standard=dup_key[2],
+                    duplicate_count=count,
+                )
+
+        rows = list(deduped.values())
+        extracted_count = sum(1 for r in rows if r.value is not None)
         return rows, extracted_count, requested_count
 
 

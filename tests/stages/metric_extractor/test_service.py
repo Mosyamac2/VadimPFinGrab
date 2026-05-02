@@ -966,3 +966,148 @@ async def test_issuer_falls_back_to_full_text_on_no_anchor(
 
     # Full text made it through (the only available content).
     assert "no section 1.4 anchor anywhere here" in captured["user_text"]
+
+
+# ---------------- Patch 26 — duplicate-period dedup ----------------------
+
+
+@pytest.mark.asyncio
+async def test_patch26_duplicate_periods_dedup_avoids_unique_constraint(
+    workspace: tuple[Database, Path, Path],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Patch 26: ``replace_for_publication`` used to crash with
+    ``IntegrityError: UNIQUE constraint failed: metrics.ticker, …,
+    metrics.metric_name`` when the LLM emitted two ``extractions[]``
+    entries with the same ``(reporting_date, period_type,
+    reporting_standard)``. We now dedup in-memory before flushing — keep
+    the row with the non-null value, log the duplicate so the operator
+    can see it without reading the DB."""
+    db, raw_dir, processed_dir = workspace
+    pub_id = _seed_publication(
+        db, pub_id="pub-dup", standards=["IFRS"], raw_dir=raw_dir
+    )
+
+    def handler(req: LLMRequest) -> dict[str, Any]:
+        # Two extractions for the SAME (date, period_type, standard) —
+        # second one carries values, first one carries nulls. Dedup must
+        # surface the value-bearing row.
+        return {
+            "extractions": [
+                {
+                    "reporting_date": "2025-12-31",
+                    "period_type": "FY",
+                    "reporting_standard": "IFRS",
+                    "currency": "RUB",
+                    "unit": "ones",
+                    "metrics": {
+                        "revenue": {"value": None, "source_quote": None},
+                        "ebitda": {"value": None, "source_quote": None},
+                        "net_income": {"value": None, "source_quote": None},
+                        "total_assets": {"value": None, "source_quote": None},
+                        "total_debt": {"value": None, "source_quote": None},
+                    },
+                },
+                {
+                    "reporting_date": "2025-12-31",
+                    "period_type": "FY",
+                    "reporting_standard": "IFRS",
+                    "currency": "RUB",
+                    "unit": "ones",
+                    "metrics": {
+                        "revenue": {"value": 100.0, "source_quote": "r"},
+                        "ebitda": {"value": 30.0, "source_quote": "e"},
+                        "net_income": {"value": 10.0, "source_quote": "n"},
+                        "total_assets": {"value": 5000.0, "source_quote": "ta"},
+                        "total_debt": {"value": 2000.0, "source_quote": "td"},
+                    },
+                },
+            ]
+        }
+
+    llm = _FakeLLM(handler=handler)
+    service, conn = _build_service(db, raw_dir, processed_dir, llm)
+    try:
+        pub = PublicationsRepo(db, conn).get_by_id(pub_id)
+        assert pub is not None
+        with caplog.at_level("WARNING"):
+            await service.run([pub])
+        rows = MetricsRepo(db, conn).list_for_publication(pub_id)
+        pub_after = PublicationsRepo(db, conn).get_by_id(pub_id)
+    finally:
+        conn.close()
+
+    # Without dedup this used to be 10 rows and crash on UNIQUE. Now: 5
+    # canonical metrics, value-bearing row of each (the second period).
+    assert len(rows) == 5
+    by_name = {r.metric_name: r for r in rows}
+    assert by_name["revenue"].value == 100.0
+    assert by_name["net_income"].value == 10.0
+    # Status reaches ``extracted`` rather than ``failed``.
+    assert pub_after is not None and pub_after.status == "extracted"
+    # Operator gets a heads-up about the duplicate the LLM produced.
+    assert any(
+        "metric_extract_duplicate_period" in r.getMessage() for r in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_patch26_duplicate_period_keeps_nonnull_when_first_has_value(
+    workspace: tuple[Database, Path, Path],
+) -> None:
+    """If the duplicate ordering is reversed (value-first, null-second),
+    dedup still picks the non-null row — it's not just "last wins"."""
+    db, raw_dir, processed_dir = workspace
+    pub_id = _seed_publication(
+        db, pub_id="pub-dup-2", standards=["IFRS"], raw_dir=raw_dir
+    )
+
+    def handler(req: LLMRequest) -> dict[str, Any]:
+        return {
+            "extractions": [
+                {
+                    "reporting_date": "2025-12-31",
+                    "period_type": "FY",
+                    "reporting_standard": "IFRS",
+                    "currency": "RUB",
+                    "unit": "ones",
+                    "metrics": {
+                        "revenue": {"value": 99.0, "source_quote": "r"},
+                        "ebitda": {"value": None, "source_quote": None},
+                        "net_income": {"value": 5.0, "source_quote": "n"},
+                        "total_assets": {"value": None, "source_quote": None},
+                        "total_debt": {"value": None, "source_quote": None},
+                    },
+                },
+                {
+                    "reporting_date": "2025-12-31",
+                    "period_type": "FY",
+                    "reporting_standard": "IFRS",
+                    "currency": "RUB",
+                    "unit": "ones",
+                    "metrics": {
+                        "revenue": {"value": None, "source_quote": None},
+                        "ebitda": {"value": None, "source_quote": None},
+                        "net_income": {"value": None, "source_quote": None},
+                        "total_assets": {"value": None, "source_quote": None},
+                        "total_debt": {"value": None, "source_quote": None},
+                    },
+                },
+            ]
+        }
+
+    llm = _FakeLLM(handler=handler)
+    service, conn = _build_service(db, raw_dir, processed_dir, llm)
+    try:
+        pub = PublicationsRepo(db, conn).get_by_id(pub_id)
+        assert pub is not None
+        await service.run([pub])
+        rows = MetricsRepo(db, conn).list_for_publication(pub_id)
+    finally:
+        conn.close()
+
+    by_name = {r.metric_name: r for r in rows}
+    # The non-null values from the first period survive; the nulls from
+    # the second don't overwrite them.
+    assert by_name["revenue"].value == 99.0
+    assert by_name["net_income"].value == 5.0
