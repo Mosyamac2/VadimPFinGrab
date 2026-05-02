@@ -1,10 +1,17 @@
-"""Build a strict JSON Schema from :class:`MetricsConfig` (ТЗ §5)."""
+"""Build a strict JSON Schema from a :class:`MetricsProfile` (Patch 19).
+
+The schema is parameterised by the (profile, source_standard) pair so an
+RSBU document doesn't carry a ``"ebitda"`` slot the LLM would be tempted
+to fill (it can't — RSBU doesn't publish EBITDA). Metrics with
+``only_in_sources`` that exclude the chosen source are dropped from
+``required`` and from ``properties``.
+"""
 
 from __future__ import annotations
 
 from typing import Any
 
-from edx.config import MetricsConfig
+from edx.config import MetricsProfile, ReportingStandard
 
 PERIOD_TYPES: tuple[str, ...] = (
     "Q1",
@@ -17,34 +24,36 @@ PERIOD_TYPES: tuple[str, ...] = (
     "FY",
 )
 UNITS: tuple[str, ...] = ("ones", "thousands", "millions", "billions")
-REPORTING_STANDARDS: tuple[str, ...] = ("IFRS", "RSBU")
+REPORTING_STANDARDS: tuple[str, ...] = ("IFRS", "RSBU", "ISSUER")
 
 
-def build_metric_extraction_schema(metrics_config: MetricsConfig) -> dict[str, Any]:
+def build_metric_extraction_schema(
+    profile: MetricsProfile, *, source_standard: ReportingStandard
+) -> dict[str, Any]:
     """Return a deterministic JSON Schema matching the LLM contract.
 
-    Output shape::
+    Output shape per period::
 
         {
-            "extractions": [
-                {
-                    "reporting_date": "YYYY-MM-DD",
-                    "period_type": "Q1|...|FY",
-                    "reporting_standard": "IFRS|RSBU",
-                    "currency": "RUB|USD|...",
-                    "unit": "ones|thousands|millions|billions",
-                    "metrics": {
-                        "<canonical_name>": {
-                            "value": <number|null>,
-                            "source_quote": "<exact text from doc|null>"
-                        },
-                        ...
-                    }
-                }
-            ]
+            "reporting_date": "YYYY-MM-DD",
+            "period_type": "Q1|...|FY",
+            "reporting_standard": "IFRS|RSBU|ISSUER",
+            "currency": "RUB|USD|...",
+            "unit": "ones|thousands|millions|billions",
+            "metrics": {
+                "<canonical_name>": {
+                    "value": <number|null>,
+                    "source_quote": "<exact text|null>"
+                },
+                ...
+            }
         }
     """
-    canonical_names = [m.canonical_name for m in metrics_config.metrics]
+    canonical_names = [
+        name
+        for name, spec in profile.metrics.items()
+        if not spec.only_in_sources or source_standard in spec.only_in_sources
+    ]
     metric_props: dict[str, Any] = {
         name: {
             "type": "object",

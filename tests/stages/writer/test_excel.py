@@ -15,6 +15,7 @@ from edx.stages.writer.excel import (
     MetaSnapshot,
     MetricExportRow,
     QAIssueExportRow,
+    TickerExportRow,
     WitrineSnapshot,
 )
 
@@ -67,6 +68,20 @@ def _snapshot() -> WitrineSnapshot:
                 created_at="2026-05-01T00:00:00+00:00",
             )
         ],
+        tickers=[
+            TickerExportRow(
+                ticker="SBER",
+                name="Sberbank",
+                profile="bank",
+                e_disclosure_id="3043",
+            ),
+            TickerExportRow(
+                ticker="LKOH",
+                name="Lukoil",
+                profile="non_bank",
+                e_disclosure_id="17",
+            ),
+        ],
         meta=MetaSnapshot(
             last_updated_at="2026-05-01T00:00:00+00:00",
             pipeline_version="0.1.0",
@@ -84,7 +99,22 @@ def test_excel_writer_round_trips_all_sheets(tmp_path: Path) -> None:
     ExcelWriter().write(target, _snapshot())
     assert target.is_file()
     wb = load_workbook(target)
-    assert set(wb.sheetnames) == {"metrics", "events", "meta", "qa_issues"}
+    # Patch 19: dedicated ``tickers`` sheet with the issuer profile column.
+    assert set(wb.sheetnames) == {
+        "metrics",
+        "events",
+        "tickers",
+        "meta",
+        "qa_issues",
+    }
+    tickers = wb["tickers"]
+    headers = [c.value for c in tickers[1]]
+    assert headers == ["ticker", "name", "profile", "e_disclosure_id"]
+    profiles = {
+        tickers.cell(row=r, column=1).value: tickers.cell(row=r, column=3).value
+        for r in range(2, tickers.max_row + 1)
+    }
+    assert profiles == {"SBER": "bank", "LKOH": "non_bank"}
 
 
 def test_metrics_sheet_headers_and_values(tmp_path: Path) -> None:

@@ -5,7 +5,12 @@
 # during initial setup — replace `e_disclosure_id: REPLACE_ME` with the real
 # numeric identifier from the issuer's e-disclosure card URL.
 #
+# Required fields:
+#   ticker, e_disclosure_id, name
 # Optional fields:
+#   profile — bank | non_bank (default non_bank). Drives the metric set
+#             used for extraction (see config/metrics.yaml).
+#             Banks: SBER, VTBR, BSPB, TCSG (T-Technologies), MBNK, SVCB.
 #   inn / ogrn — for downstream cross-references; not required for scraping.
 #   priority_override — overrides metrics.reporting_priority for this issuer.
 
@@ -13,17 +18,20 @@ tickers:
   - ticker: SBER
     e_disclosure_id: REPLACE_ME
     name: ПАО Сбербанк
+    profile: bank
     inn: "7707083893"
     ogrn: "1027700132195"
 
   - ticker: GAZP
     e_disclosure_id: REPLACE_ME
     name: ПАО Газпром
+    profile: non_bank
     inn: "7736050003"
     ogrn: "1027700070518"
 
   - ticker: LKOH
     e_disclosure_id: REPLACE_ME
     name: ПАО ЛУКОЙЛ
+    profile: non_bank
     inn: "7708004767"
     ogrn: "1027700035769"

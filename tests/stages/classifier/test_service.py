@@ -9,7 +9,12 @@ from pathlib import Path
 
 import pytest
 
-from edx.config import MetricsConfig, MetricSpec, TickerEntry
+from edx.config import (
+    MetricsConfig,
+    MetricSpec,
+    MetricsProfile,
+    TickerEntry,
+)
 from edx.stages.classifier.service import ClassifierService
 from edx.storage import (
     Database,
@@ -21,9 +26,24 @@ from edx.storage import (
 
 REAL_FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "pdf"
 
+# Minimal Patch-19-shaped config — Classifier only uses it to score the
+# reporting standard via heuristics, so the contents don't matter beyond
+# satisfying the schema.
 _METRICS_CONFIG = MetricsConfig(
-    metrics=[MetricSpec(canonical_name="revenue")],
-    reporting_priority=["IFRS", "RSBU"],
+    profiles={
+        "non_bank": MetricsProfile(
+            metrics={"revenue": MetricSpec(synonyms=["Выручка"])},
+            reporting_priority=["IFRS", "RSBU"],
+        ),
+        "bank": MetricsProfile(
+            metrics={
+                "net_interest_income": MetricSpec(
+                    synonyms=["Чистый процентный доход"]
+                )
+            },
+            reporting_priority=["IFRS", "RSBU"],
+        ),
+    }
 )
 
 

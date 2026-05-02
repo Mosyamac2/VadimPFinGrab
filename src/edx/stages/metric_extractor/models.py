@@ -6,8 +6,13 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from edx.config.metrics_config import MetricUnit, ReportingStandard
+from edx.config.metrics_config import ReportingStandard
 from edx.storage.models import PeriodType
+
+# The LLM responds with one of these as ``unit`` (Patch 19 keeps the wire
+# format identical; the conversion to ``ones`` happens in
+# :mod:`edx.stages.metric_extractor.service`).
+MetricUnit = Literal["ones", "thousands", "millions", "billions"]
 
 
 class MetricExtractionItem(BaseModel):

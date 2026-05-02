@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from edx import __version__
+from edx.config import TickersConfig
 from edx.logging_setup import get_logger
 from edx.stages.writer.excel import (
     EventExportRow,
@@ -13,6 +14,7 @@ from edx.stages.writer.excel import (
     MetaSnapshot,
     MetricExportRow,
     QAIssueExportRow,
+    TickerExportRow,
     WitrineSnapshot,
 )
 from edx.storage import (
@@ -35,6 +37,7 @@ class WriterService:
         qa_issues_repo: QAIssuesRepo,
         tickers_repo: TickersRepo,
         *,
+        tickers_config: TickersConfig,
         excel_path: Path,
         excel_writer: ExcelWriter | None = None,
     ) -> None:
@@ -43,6 +46,7 @@ class WriterService:
         self.events_repo = events_repo
         self.qa_issues_repo = qa_issues_repo
         self.tickers_repo = tickers_repo
+        self.tickers_config = tickers_config
         self.excel_path = Path(excel_path)
         self.excel_writer = excel_writer or ExcelWriter()
         self._log = get_logger("edx.stages.writer")
@@ -111,6 +115,18 @@ class WriterService:
             for issue in self.qa_issues_repo.list_all()
         ]
 
+        # Patch 19: emit one row per configured ticker so analysts see
+        # which metric set (bank vs non_bank) each issuer was scored on.
+        ticker_rows = [
+            TickerExportRow(
+                ticker=entry.ticker,
+                name=entry.name,
+                profile=entry.profile,
+                e_disclosure_id=entry.e_disclosure_id,
+            )
+            for entry in self.tickers_config.tickers
+        ]
+
         meta = MetaSnapshot(
             last_updated_at=datetime.now(UTC).isoformat(timespec="seconds"),
             pipeline_version=__version__,
@@ -126,6 +142,7 @@ class WriterService:
             metrics=metric_rows,
             events=event_rows,
             qa_issues=qa_rows,
+            tickers=ticker_rows,
             meta=meta,
         )
 

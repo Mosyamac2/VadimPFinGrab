@@ -1,13 +1,17 @@
-"""Build the LLM system prompt from :class:`MetricsConfig`.
+"""Build the LLM system prompt from a :class:`MetricsProfile`.
 
-The static preamble is at the top so prompt-caching wins are maximised across
-calls. The dynamic section enumerates the metric catalogue from
-``metrics.yaml`` — operators add new metrics there without touching code.
+Patch 19 narrows the prompt by issuer profile (bank vs non-bank) AND by
+source standard (IFRS vs RSBU vs ISSUER): metrics with
+``only_in_sources`` that don't include the chosen source are dropped
+from the prompt entirely (saves tokens, prevents the LLM from
+hallucinating an EBITDA out of an RSBU document); ``aggregation_hint``
+is injected only when the source is RSBU (the IFRS path already
+publishes the aggregated form).
 """
 
 from __future__ import annotations
 
-from edx.config import MetricsConfig
+from edx.config import MetricSpec, MetricsProfile, ReportingStandard
 
 _STATIC_PREAMBLE: str = """\
 Ты — эксперт по извлечению финансовых показателей из публичной российской
@@ -33,22 +37,59 @@ JSON-схеме, описывающий показатели по каждому
 """
 
 
-def build_system_prompt(metrics_config: MetricsConfig) -> str:
-    """Stable system prompt, deterministic from the metrics catalogue."""
+def build_system_prompt(
+    profile: MetricsProfile, *, source_standard: ReportingStandard
+) -> str:
+    """Stable prompt for the (profile, source_standard) pair.
+
+    Strips metrics whose ``only_in_sources`` excludes ``source_standard``
+    and adds RSBU-only ``aggregation_hint`` notes underneath the metric
+    list.
+    """
+    selected = _select_metrics(profile, source_standard)
     lines: list[str] = [_STATIC_PREAMBLE.rstrip(), "", "Перечень показателей:"]
-    for spec in metrics_config.metrics:
-        ifrs = ", ".join(spec.synonyms_ifrs) if spec.synonyms_ifrs else "—"
-        rsbu = ", ".join(spec.synonyms_rsbu) if spec.synonyms_rsbu else "—"
-        formula = f" (формула: {spec.formula})" if spec.formula else ""
-        lines.append(
-            f"- {spec.canonical_name} — целевая валюта {spec.currency},"
-            f" базовая единица {spec.unit}{formula}\n"
-            f"  Синонимы IFRS: {ifrs}\n"
-            f"  Синонимы РСБУ: {rsbu}"
+    for canonical, spec in selected.items():
+        synonyms = ", ".join(spec.synonyms) if spec.synonyms else "—"
+        scale = (
+            f" (типичные единицы: {', '.join(spec.scale_hints)})"
+            if spec.scale_hints
+            else ""
         )
-    priority = " > ".join(metrics_config.reporting_priority)
+        lines.append(
+            f"- {canonical} — целевая валюта {spec.unit}{scale}\n"
+            f"  Синонимы: {synonyms}"
+        )
+
+    rsbu_hints = [
+        (name, spec.aggregation_hint)
+        for name, spec in selected.items()
+        if source_standard == "RSBU" and spec.aggregation_hint
+    ]
+    if rsbu_hints:
+        lines.append("")
+        lines.append("Подсказки по агрегации для РСБУ:")
+        for name, hint in rsbu_hints:
+            lines.append(f"- {name}: {hint}")
+
+    priority = " > ".join(profile.reporting_priority)
     lines.append("")
     lines.append(
         f"Приоритет стандартов отчётности при выборе документа: {priority}."
     )
     return "\n".join(lines)
+
+
+def _select_metrics(
+    profile: MetricsProfile, source_standard: ReportingStandard
+) -> dict[str, MetricSpec]:
+    """Filter the profile's metric dict by ``only_in_sources``.
+
+    Returns the same insertion order as the YAML so prompt caching stays
+    stable across calls with the same (profile, source) pair.
+    """
+    out: dict[str, MetricSpec] = {}
+    for name, spec in profile.metrics.items():
+        if spec.only_in_sources and source_standard not in spec.only_in_sources:
+            continue
+        out[name] = spec
+    return out

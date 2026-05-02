@@ -8,7 +8,13 @@ from pathlib import Path
 
 import pytest
 
-from edx.config import TickerEntry
+from edx.config import (
+    MetricsConfig,
+    MetricSpec,
+    MetricsProfile,
+    TickerEntry,
+    TickersConfig,
+)
 from edx.stages.validator.service import ValidatorService
 from edx.storage import (
     Database,
@@ -19,6 +25,42 @@ from edx.storage import (
     PublicationsRepo,
     QAIssuesRepo,
     TickersRepo,
+)
+
+_METRICS_CONFIG = MetricsConfig(
+    profiles={
+        "non_bank": MetricsProfile(
+            metrics={
+                "revenue": MetricSpec(synonyms=["Выручка"]),
+                "ebitda": MetricSpec(
+                    synonyms=["EBITDA"], only_in_sources=["IFRS", "ISSUER"]
+                ),
+                "net_income": MetricSpec(synonyms=["Чистая прибыль"]),
+                "total_assets": MetricSpec(synonyms=["Итого активы"]),
+                "total_debt": MetricSpec(synonyms=["Заемные средства"]),
+            },
+            reporting_priority=["IFRS", "RSBU", "ISSUER"],
+        ),
+        "bank": MetricsProfile(
+            metrics={
+                "net_interest_income": MetricSpec(
+                    synonyms=["Чистый процентный доход"]
+                ),
+                "net_income": MetricSpec(synonyms=["Чистая прибыль"]),
+            },
+            reporting_priority=["IFRS", "RSBU", "ISSUER"],
+        ),
+    }
+)
+_TICKERS_CONFIG = TickersConfig(
+    tickers=[
+        TickerEntry(
+            ticker="SBER",
+            e_disclosure_id="1",
+            name="Sberbank",
+            profile="non_bank",
+        )
+    ]
 )
 
 
@@ -88,8 +130,9 @@ def _build_service(db: Database) -> tuple[ValidatorService, object]:
         publications_repo=PublicationsRepo(db, conn),
         metrics_repo=MetricsRepo(db, conn),
         qa_issues_repo=QAIssuesRepo(db, conn),
+        metrics_config=_METRICS_CONFIG,
+        tickers_config=_TICKERS_CONFIG,
         completeness_threshold=0.5,
-        metrics_per_period=5,
     )
     return service, conn
 

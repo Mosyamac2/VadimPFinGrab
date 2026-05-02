@@ -21,6 +21,7 @@ def build_metric_extractor_service(
         documents_repo=documents_repo,
         metrics_repo=metrics_repo,
         metrics_config=settings.metrics,
+        tickers_config=settings.tickers,
         raw_dir=settings.app.paths.raw_dir,
         processed_dir=settings.app.paths.processed_dir,
         max_tokens=settings.llm.max_tokens,

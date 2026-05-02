@@ -1,4 +1,10 @@
-"""ValidatorService — applies sanity checks and writes qa_issues."""
+"""ValidatorService — applies sanity checks and writes qa_issues.
+
+Patch 19: completeness is now per-period and per-source. The Validator
+counts only metrics that apply to the period's ``reporting_standard``
+(via the issuer profile's ``MetricSpec.only_in_sources``), so an RSBU
+period isn't penalised for a missing EBITDA — RSBU doesn't publish it.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +13,7 @@ from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+from edx.config import MetricsConfig, TickersConfig
 from edx.logging_setup import get_logger
 from edx.stages.validator.rules import (
     QAWarning,
@@ -44,14 +51,16 @@ class ValidatorService:
         metrics_repo: MetricsRepo,
         qa_issues_repo: QAIssuesRepo,
         *,
+        metrics_config: MetricsConfig,
+        tickers_config: TickersConfig,
         completeness_threshold: float = 0.5,
-        metrics_per_period: int = 0,
     ) -> None:
         self.publications_repo = publications_repo
         self.metrics_repo = metrics_repo
         self.qa_issues_repo = qa_issues_repo
+        self.metrics_config = metrics_config
+        self.tickers_config = tickers_config
         self.completeness_threshold = completeness_threshold
-        self.metrics_per_period = metrics_per_period
         self._log = get_logger("edx.stages.validator")
 
     def run(
@@ -91,17 +100,26 @@ class ValidatorService:
         warnings.extend(check_currency_consistency(metrics))
         warnings.extend(check_unit_consistency(metrics))
 
-        # Completeness over expected (metrics_per_period × periods) vs extracted.
-        if periods:
-            expected_per_period = (
-                self.metrics_per_period
-                if self.metrics_per_period
-                else len(periods[next(iter(periods))])
+        # Patch 19: per-period expected count restricted to metrics that
+        # apply to that period's reporting_standard (only_in_sources).
+        # Extracted is the count of non-null applicable metric rows.
+        profile_name = self._profile_for_ticker(pub.ticker)
+        applicable_per_period: dict[PeriodKey, set[str]] = {
+            key: self._applicable_metric_names(profile_name, key[2])
+            for key in periods
+        }
+        requested = sum(
+            len(applicable) for applicable in applicable_per_period.values()
+        )
+        extracted = sum(
+            1
+            for m in metrics
+            if m.value is not None
+            and m.metric_name
+            in applicable_per_period.get(
+                (m.reporting_date, m.period_type, m.reporting_standard), set()
             )
-            requested = expected_per_period * len(periods)
-        else:
-            requested = self.metrics_per_period
-        extracted = sum(1 for m in metrics if m.value is not None)
+        )
         completeness_warnings = check_completeness(
             extracted, requested, self.completeness_threshold
         )
@@ -138,6 +156,30 @@ class ValidatorService:
             metric_rows_flagged=flagged,
             is_incomplete=is_incomplete,
         )
+
+    def _profile_for_ticker(self, ticker: str) -> str:
+        entry = self.tickers_config.find(ticker)
+        return entry.profile if entry else "non_bank"
+
+    def _applicable_metric_names(
+        self, profile_name: str, source_standard: str
+    ) -> set[str]:
+        """Names of metrics that should exist for ``(profile, source)``."""
+        try:
+            profile = self.metrics_config.for_profile(profile_name)  # type: ignore[arg-type]
+        except KeyError:
+            return set()
+        # Source standard from metrics row may be IFRS/RSBU; ISSUER appears
+        # only after Patch 21 (Validator just falls through if it's something
+        # else by treating only_in_sources as a strict allowlist).
+        result: set[str] = set()
+        for name, spec in profile.metrics.items():
+            if spec.only_in_sources is None:
+                result.add(name)
+                continue
+            if source_standard in spec.only_in_sources:
+                result.add(name)
+        return result
 
     def _previous_period_metrics(
         self, ticker: str, current_key: PeriodKey

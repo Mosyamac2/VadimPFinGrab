@@ -11,7 +11,13 @@ from typing import Any
 
 import pytest
 
-from edx.config import MetricsConfig, MetricSpec, TickerEntry
+from edx.config import (
+    MetricsConfig,
+    MetricSpec,
+    MetricsProfile,
+    TickerEntry,
+    TickersConfig,
+)
 from edx.providers.llm import LLMRequest, LLMResponse
 from edx.stages.metric_extractor.service import (
     MetricExtractorService,
@@ -27,14 +33,51 @@ from edx.storage import (
 )
 
 _METRICS_CONFIG = MetricsConfig(
-    metrics=[
-        MetricSpec(canonical_name="revenue"),
-        MetricSpec(canonical_name="ebitda"),
-        MetricSpec(canonical_name="net_income"),
-        MetricSpec(canonical_name="total_assets"),
-        MetricSpec(canonical_name="total_debt"),
-    ],
-    reporting_priority=["IFRS", "RSBU"],
+    profiles={
+        "non_bank": MetricsProfile(
+            metrics={
+                "revenue": MetricSpec(synonyms=["Выручка"]),
+                "ebitda": MetricSpec(
+                    synonyms=["EBITDA"],
+                    only_in_sources=["IFRS", "ISSUER"],
+                ),
+                "net_income": MetricSpec(synonyms=["Чистая прибыль"]),
+                "total_assets": MetricSpec(synonyms=["Итого активы"]),
+                "total_debt": MetricSpec(
+                    synonyms=["Заемные средства"],
+                    aggregation_hint="sum 1410+1510",
+                ),
+            },
+            reporting_priority=["IFRS", "RSBU", "ISSUER"],
+        ),
+        "bank": MetricsProfile(
+            metrics={
+                "net_interest_income": MetricSpec(
+                    synonyms=["Чистый процентный доход"]
+                ),
+                "net_fee_income": MetricSpec(
+                    synonyms=["Чистый комиссионный доход"]
+                ),
+                "net_income": MetricSpec(synonyms=["Чистая прибыль"]),
+                "total_assets": MetricSpec(synonyms=["Итого активы"]),
+                "total_equity": MetricSpec(
+                    synonyms=["Итого собственный капитал"]
+                ),
+            },
+            reporting_priority=["IFRS", "RSBU", "ISSUER"],
+        ),
+    }
+)
+
+_TICKERS_CONFIG = TickersConfig(
+    tickers=[
+        TickerEntry(
+            ticker="SBER",
+            e_disclosure_id="1",
+            name="Sberbank",
+            profile="non_bank",  # tests default to non_bank for shared fixtures
+        )
+    ]
 )
 
 
@@ -148,6 +191,7 @@ def _build_service(
     llm: _FakeLLM,
     *,
     completeness_threshold: float = 0.5,
+    tickers_config: TickersConfig = _TICKERS_CONFIG,
 ) -> tuple[MetricExtractorService, object]:
     conn = db.connect()
     service = MetricExtractorService(
@@ -156,6 +200,7 @@ def _build_service(
         DocumentsRepo(db, conn),
         MetricsRepo(db, conn),
         metrics_config=_METRICS_CONFIG,
+        tickers_config=tickers_config,
         raw_dir=raw_dir,
         processed_dir=processed_dir,
         max_tokens=2048,
@@ -458,3 +503,224 @@ async def test_unit_normalization_writes_absolute_value(
     by_name = {r.metric_name: r for r in rows}
     # 1500 thousands × 1000 / 1 (ones) = 1_500_000
     assert by_name["revenue"].value == 1_500_000
+
+
+# ---------------- Patch 19 — profile + only_in_sources + aggregation -----
+
+
+@pytest.mark.asyncio
+async def test_bank_profile_prompt_carries_bank_metrics_only(
+    workspace: tuple[Database, Path, Path],
+) -> None:
+    """SBER as a bank: prompt must contain net_interest_income, NOT revenue/ebitda."""
+    db, raw_dir, processed_dir = workspace
+    pub_id = _seed_publication(
+        db, pub_id="pub-1", standards=["IFRS"], raw_dir=raw_dir
+    )
+
+    bank_tickers = TickersConfig(
+        tickers=[
+            TickerEntry(
+                ticker="SBER",
+                e_disclosure_id="1",
+                name="Sberbank",
+                profile="bank",
+            )
+        ]
+    )
+
+    captured: dict[str, str] = {}
+
+    def handler(req: LLMRequest) -> dict[str, Any]:
+        captured["system"] = req.system
+        return {
+            "extractions": [
+                {
+                    "reporting_date": "2025-12-31",
+                    "period_type": "FY",
+                    "reporting_standard": "IFRS",
+                    "currency": "RUB",
+                    "unit": "ones",
+                    "metrics": {
+                        "net_interest_income": {"value": 100.0, "source_quote": "NII 100"},
+                        "net_fee_income": {"value": 50.0, "source_quote": "NF 50"},
+                        "net_income": {"value": 30.0, "source_quote": "NI 30"},
+                        "total_assets": {"value": 1000.0, "source_quote": "TA 1000"},
+                        "total_equity": {"value": 200.0, "source_quote": "TE 200"},
+                    },
+                }
+            ]
+        }
+
+    llm = _FakeLLM(handler=handler)
+    service, conn = _build_service(
+        db, raw_dir, processed_dir, llm, tickers_config=bank_tickers
+    )
+    try:
+        pub = PublicationsRepo(db, conn).get_by_id(pub_id)
+        assert pub is not None
+        await service.run([pub])
+    finally:
+        conn.close()
+
+    assert "net_interest_income" in captured["system"]
+    assert "net_fee_income" in captured["system"]
+    # Bank prompt must NOT mention non-bank metrics.
+    assert "revenue" not in captured["system"].lower().split()
+    assert "EBITDA" not in captured["system"]
+
+
+@pytest.mark.asyncio
+async def test_non_bank_profile_prompt_carries_corp_metrics(
+    workspace: tuple[Database, Path, Path],
+) -> None:
+    """Default non_bank profile: prompt mentions revenue / EBITDA / total_debt."""
+    db, raw_dir, processed_dir = workspace
+    pub_id = _seed_publication(
+        db, pub_id="pub-1", standards=["IFRS"], raw_dir=raw_dir
+    )
+    captured: dict[str, str] = {}
+
+    def handler(req: LLMRequest) -> dict[str, Any]:
+        captured["system"] = req.system
+        return _full_extraction_payload()
+
+    llm = _FakeLLM(handler=handler)
+    service, conn = _build_service(db, raw_dir, processed_dir, llm)
+    try:
+        pub = PublicationsRepo(db, conn).get_by_id(pub_id)
+        assert pub is not None
+        await service.run([pub])
+    finally:
+        conn.close()
+
+    assert "revenue" in captured["system"]
+    assert "ebitda" in captured["system"]
+    assert "Заемные средства" in captured["system"]
+
+
+@pytest.mark.asyncio
+async def test_rsbu_source_drops_ebitda_from_prompt_and_completeness(
+    workspace: tuple[Database, Path, Path],
+) -> None:
+    """Patch 19: RSBU document — ebitda is filtered out of the prompt AND
+    excluded from completeness so a missing one doesn't penalise coverage."""
+    db, raw_dir, processed_dir = workspace
+    pub_id = _seed_publication(
+        db, pub_id="pub-1", standards=["RSBU"], raw_dir=raw_dir
+    )
+
+    captured: dict[str, str] = {}
+
+    def handler(req: LLMRequest) -> dict[str, Any]:
+        captured["system"] = req.system
+        # LLM responds without ebitda — Service must not request/store it.
+        return {
+            "extractions": [
+                {
+                    "reporting_date": "2025-12-31",
+                    "period_type": "FY",
+                    "reporting_standard": "RSBU",
+                    "currency": "RUB",
+                    "unit": "ones",
+                    "metrics": {
+                        "revenue": {"value": 1.0, "source_quote": "r"},
+                        "net_income": {"value": 1.0, "source_quote": "n"},
+                        "total_assets": {"value": 1.0, "source_quote": "ta"},
+                        "total_debt": {"value": 1.0, "source_quote": "td"},
+                    },
+                }
+            ]
+        }
+
+    llm = _FakeLLM(handler=handler)
+    service, conn = _build_service(db, raw_dir, processed_dir, llm)
+    try:
+        pub = PublicationsRepo(db, conn).get_by_id(pub_id)
+        assert pub is not None
+        outcomes = await service.run([pub])
+        rows = MetricsRepo(db, conn).list_for_publication(pub_id)
+    finally:
+        conn.close()
+
+    # ebitda dropped from the prompt entirely.
+    assert "ebitda" not in captured["system"].lower()
+    # Only 4 applicable metrics for RSBU (no ebitda) — all 4 returned →
+    # full coverage, not penalised for the missing IFRS-only metric.
+    assert outcomes[0].requested_count == 4
+    assert outcomes[0].extracted_count == 4
+    assert outcomes[0].coverage_ratio == 1.0
+    assert outcomes[0].is_incomplete is False
+    by_name = {r.metric_name for r in rows}
+    assert "ebitda" not in by_name
+
+
+@pytest.mark.asyncio
+async def test_rsbu_source_includes_total_debt_aggregation_hint(
+    workspace: tuple[Database, Path, Path],
+) -> None:
+    """Patch 19: aggregation_hint for total_debt is injected only on RSBU."""
+    db, raw_dir, processed_dir = workspace
+    pub_id = _seed_publication(
+        db, pub_id="pub-1", standards=["RSBU"], raw_dir=raw_dir
+    )
+
+    captured: dict[str, str] = {}
+
+    def handler(req: LLMRequest) -> dict[str, Any]:
+        captured["system"] = req.system
+        return {
+            "extractions": [
+                {
+                    "reporting_date": "2025-12-31",
+                    "period_type": "FY",
+                    "reporting_standard": "RSBU",
+                    "currency": "RUB",
+                    "unit": "ones",
+                    "metrics": {
+                        "revenue": {"value": 1.0, "source_quote": "r"},
+                        "net_income": {"value": 1.0, "source_quote": "n"},
+                        "total_assets": {"value": 1.0, "source_quote": "ta"},
+                        "total_debt": {"value": 1.0, "source_quote": "td"},
+                    },
+                }
+            ]
+        }
+
+    llm = _FakeLLM(handler=handler)
+    service, conn = _build_service(db, raw_dir, processed_dir, llm)
+    try:
+        pub = PublicationsRepo(db, conn).get_by_id(pub_id)
+        assert pub is not None
+        await service.run([pub])
+    finally:
+        conn.close()
+
+    assert "1410+1510" in captured["system"]
+
+
+@pytest.mark.asyncio
+async def test_ifrs_source_does_not_inject_rsbu_hint(
+    workspace: tuple[Database, Path, Path],
+) -> None:
+    """Aggregation hint must not appear when source is IFRS."""
+    db, raw_dir, processed_dir = workspace
+    pub_id = _seed_publication(
+        db, pub_id="pub-1", standards=["IFRS"], raw_dir=raw_dir
+    )
+    captured: dict[str, str] = {}
+
+    def handler(req: LLMRequest) -> dict[str, Any]:
+        captured["system"] = req.system
+        return _full_extraction_payload()
+
+    llm = _FakeLLM(handler=handler)
+    service, conn = _build_service(db, raw_dir, processed_dir, llm)
+    try:
+        pub = PublicationsRepo(db, conn).get_by_id(pub_id)
+        assert pub is not None
+        await service.run([pub])
+    finally:
+        conn.close()
+
+    assert "1410+1510" not in captured["system"]

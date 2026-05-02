@@ -1,4 +1,11 @@
-"""MetricExtractorService — runs the LLM extraction for one publication."""
+"""MetricExtractorService — runs the LLM extraction for one publication.
+
+Patch 19 routes each publication through its issuer's profile (bank vs
+non-bank) and tailors the LLM prompt + JSON schema to the (profile,
+source_standard) pair: the prompt skips metrics that don't apply to the
+chosen source (``only_in_sources``) and adds RSBU-only aggregation hints
+where the metric spans several balance lines.
+"""
 
 from __future__ import annotations
 
@@ -6,14 +13,18 @@ import json
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal
 
 from pydantic import ValidationError
 
-from edx.config import MetricsConfig
+from edx.config import (
+    MetricsConfig,
+    MetricsProfile,
+    ReportingStandard,
+    TickersConfig,
+)
 from edx.logging_setup import get_logger
 from edx.providers.llm import LLMProvider, LLMRequest, LLMUnavailableError
-from edx.stages.metric_extractor.formula import safe_formula_eval
 from edx.stages.metric_extractor.models import (
     MetricExtractionItem,
     MetricExtractionResult,
@@ -36,6 +47,9 @@ UNIT_MULTIPLIER: Final[dict[str, int]] = {
     "billions": 1_000_000_000,
 }
 
+# Targeting normalised values, the storage layer always stores ``ones``.
+TARGET_UNIT: Final[str] = "ones"
+
 
 @dataclass(frozen=True)
 class MetricExtractOutcome:
@@ -49,11 +63,7 @@ class MetricExtractOutcome:
 
 
 class MetricExtractorService:
-    """Drives one LLM extraction per publication.
-
-    The service is provider-agnostic: it talks only to :class:`LLMProvider`
-    and never imports ``anthropic`` / ``openai`` / ``httpx`` directly.
-    """
+    """Drives one LLM extraction per publication."""
 
     def __init__(
         self,
@@ -63,6 +73,7 @@ class MetricExtractorService:
         metrics_repo: MetricsRepo,
         *,
         metrics_config: MetricsConfig,
+        tickers_config: TickersConfig,
         raw_dir: Path,
         processed_dir: Path,
         max_tokens: int = 4096,
@@ -74,13 +85,16 @@ class MetricExtractorService:
         self.documents_repo = documents_repo
         self.metrics_repo = metrics_repo
         self.metrics_config = metrics_config
+        self.tickers_config = tickers_config
         self.raw_dir = Path(raw_dir)
         self.processed_dir = Path(processed_dir)
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.completeness_threshold = completeness_threshold
-        self._json_schema = build_metric_extraction_schema(metrics_config)
-        self._system_prompt = build_system_prompt(metrics_config)
+        # Cache prompt+schema per (profile, source_standard). At most
+        # 2 profiles × 3 standards = 6 entries.
+        self._prompt_cache: dict[tuple[str, str], str] = {}
+        self._schema_cache: dict[tuple[str, str], dict[str, object]] = {}
         self._log = get_logger("edx.stages.metric_extractor")
 
     async def run(
@@ -125,17 +139,25 @@ class MetricExtractorService:
         return outcomes
 
     async def _extract_one(self, pub: PublicationRow) -> MetricExtractOutcome:
+        ticker_entry = self.tickers_config.find(pub.ticker)
+        profile_name = ticker_entry.profile if ticker_entry else "non_bank"
+        profile = self.metrics_config.for_profile(profile_name)
+
         documents = self.documents_repo.list_for_publication(pub.publication_id)
-        chosen, chosen_standard = self._pick_documents(documents)
+        chosen, chosen_standard = self._pick_documents(documents, profile)
         if not chosen:
             self._log.warning(
                 "metric_extract_no_eligible_docs",
                 publication_id=pub.publication_id,
+                profile=profile_name,
             )
             self.publications_repo.mark_status(
                 pub.publication_id,
                 "skipped",
-                error="no IFRS or RSBU document available",
+                error=(
+                    "no document matches profile reporting_priority "
+                    f"{profile.reporting_priority}"
+                ),
             )
             return MetricExtractOutcome(
                 publication_id=pub.publication_id,
@@ -144,14 +166,18 @@ class MetricExtractorService:
                 requested_count=0,
                 coverage_ratio=0.0,
                 is_incomplete=False,
-                skipped_reason="no IFRS or RSBU document",
+                skipped_reason="no eligible document for profile",
             )
 
         primary_doc = chosen[0]
-        request = self._build_request(pub, chosen, chosen_standard)
+        # ``_pick_documents`` only returns ``None`` for the standard when
+        # ``chosen`` is empty, which is handled above; reassure mypy here.
+        assert chosen_standard is not None
+        request = self._build_request(pub, chosen, profile, chosen_standard)
         self._log.info(
             "metric_extract_start",
             publication_id=pub.publication_id,
+            profile=profile_name,
             standard=chosen_standard,
             docs=[d.relative_path for d in chosen],
             sends_pdf=request.pdf_bytes is not None,
@@ -160,12 +186,15 @@ class MetricExtractorService:
         response = await self.llm_provider.complete(request)
         result = MetricExtractionResult.model_validate(response.data)
 
+        applicable_metrics = self._applicable_metric_names(
+            profile, chosen_standard
+        )
+
         if not result.extractions:
             self._log.warning(
                 "metric_extract_no_periods",
                 publication_id=pub.publication_id,
             )
-            # No periods → publication is incomplete but not failed.
             self.publications_repo.mark_incomplete(pub.publication_id, True)
             self.documents_repo.set_primary_for_publication(
                 pub.publication_id, primary_doc.document_id
@@ -174,14 +203,14 @@ class MetricExtractorService:
                 publication_id=pub.publication_id,
                 rows_written=0,
                 extracted_count=0,
-                requested_count=len(self.metrics_config.metrics),
+                requested_count=len(applicable_metrics),
                 coverage_ratio=0.0,
                 is_incomplete=True,
                 skipped_reason="LLM returned no extractions",
             )
 
         rows, extracted_count, requested_count = self._build_metric_rows(
-            pub, primary_doc, result
+            pub, primary_doc, result, profile, applicable_metrics
         )
         self.metrics_repo.replace_for_publication(pub.publication_id, rows)
         self.documents_repo.set_primary_for_publication(
@@ -199,6 +228,7 @@ class MetricExtractorService:
         self._log.info(
             "metric_extract_completed",
             publication_id=pub.publication_id,
+            profile=profile_name,
             standard=chosen_standard,
             periods=len(result.extractions),
             rows_written=len(rows),
@@ -219,20 +249,64 @@ class MetricExtractorService:
         )
 
     def _pick_documents(
-        self, documents: list[DocumentRow]
-    ) -> tuple[list[DocumentRow], str]:
-        for standard in self.metrics_config.reporting_priority:
+        self,
+        documents: list[DocumentRow],
+        profile: MetricsProfile,
+    ) -> tuple[list[DocumentRow], ReportingStandard | None]:
+        for standard in profile.reporting_priority:
             chosen = [d for d in documents if d.reporting_standard == standard]
             if chosen:
                 return chosen, standard
-        return [], ""
+        return [], None
+
+    def _applicable_metric_names(
+        self, profile: MetricsProfile, source_standard: ReportingStandard
+    ) -> list[str]:
+        return [
+            name
+            for name, spec in profile.metrics.items()
+            if not spec.only_in_sources or source_standard in spec.only_in_sources
+        ]
+
+    def _prompt_for(
+        self, profile_name: str, source_standard: ReportingStandard
+    ) -> str:
+        key = (profile_name, source_standard)
+        cached = self._prompt_cache.get(key)
+        if cached is not None:
+            return cached
+        prompt = build_system_prompt(
+            self.metrics_config.for_profile(profile_name),  # type: ignore[arg-type]
+            source_standard=source_standard,
+        )
+        self._prompt_cache[key] = prompt
+        return prompt
+
+    def _schema_for(
+        self, profile_name: str, source_standard: ReportingStandard
+    ) -> dict[str, object]:
+        key = (profile_name, source_standard)
+        cached = self._schema_cache.get(key)
+        if cached is not None:
+            return cached
+        schema = build_metric_extraction_schema(
+            self.metrics_config.for_profile(profile_name),  # type: ignore[arg-type]
+            source_standard=source_standard,
+        )
+        self._schema_cache[key] = schema
+        return schema
 
     def _build_request(
         self,
         pub: PublicationRow,
         chosen: list[DocumentRow],
-        standard: str,
+        profile: MetricsProfile,
+        standard: ReportingStandard,
     ) -> LLMRequest:
+        del profile  # only the cached (profile_name, standard) keying is used
+        ticker_entry = self.tickers_config.find(pub.ticker)
+        profile_name = ticker_entry.profile if ticker_entry else "non_bank"
+
         primary_doc = chosen[0]
         full_path = (
             self.raw_dir / pub.ticker / pub.publication_id / primary_doc.relative_path
@@ -248,18 +322,21 @@ class MetricExtractorService:
         if send_pdf:
             pdf_bytes: bytes | None = full_path.read_bytes()
             user_text = (
-                f"Эмитент: {pub.ticker}. Стандарт: {standard}. "
+                f"Эмитент: {pub.ticker} (профиль {profile_name}). "
+                f"Стандарт: {standard}. "
                 f"Извлеки финансовые показатели из приложенного документа."
             )
         else:
             pdf_bytes = None
-            user_text = self._assemble_user_text(pub, chosen, standard)
+            user_text = self._assemble_user_text(
+                pub, chosen, standard, profile_name
+            )
 
         return LLMRequest(
-            system=self._system_prompt,
+            system=self._prompt_for(profile_name, standard),
             user_text=user_text,
             pdf_bytes=pdf_bytes,
-            json_schema=self._json_schema,
+            json_schema=self._schema_for(profile_name, standard),
             max_tokens=self.max_tokens,
             temperature=self.temperature,
             schema_name="extract_metrics",
@@ -272,10 +349,12 @@ class MetricExtractorService:
         self,
         pub: PublicationRow,
         chosen: list[DocumentRow],
-        standard: str,
+        standard: ReportingStandard,
+        profile_name: str,
     ) -> str:
         sections: list[str] = [
-            f"Эмитент: {pub.ticker}. Стандарт отчётности: {standard}.",
+            f"Эмитент: {pub.ticker} (профиль {profile_name}). "
+            f"Стандарт отчётности: {standard}.",
         ]
         for doc in chosen:
             if not doc.text_extract_path:
@@ -312,53 +391,39 @@ class MetricExtractorService:
         pub: PublicationRow,
         primary_doc: DocumentRow,
         result: MetricExtractionResult,
+        profile: MetricsProfile,
+        applicable_metrics: list[str],
     ) -> tuple[list[MetricInput], int, int]:
         rows: list[MetricInput] = []
-        spec_by_name = {m.canonical_name: m for m in self.metrics_config.metrics}
-        formulas = {
-            m.canonical_name: m.formula
-            for m in self.metrics_config.metrics
-            if m.formula
-        }
-
         extracted_count = 0
         requested_count = 0
 
         for period in result.extractions:
-            normalized: dict[str, float | None] = {}
-            quotes: dict[str, str | None] = {}
-            for canonical, spec in spec_by_name.items():
+            # Storage's ``MetricInput.reporting_standard`` is currently
+            # ``Literal["IFRS","RSBU"]`` (CHECK constraint in 0001_init).
+            # Patch 21 will widen it to include ISSUER along with a CHECK
+            # migration; until then, fall back to RSBU when the LLM
+            # claims ISSUER so the row still inserts.
+            storage_standard: Literal["IFRS", "RSBU"] = (
+                "IFRS" if period.reporting_standard == "IFRS" else "RSBU"
+            )
+            for canonical in applicable_metrics:
                 requested_count += 1
+                spec = profile.metrics[canonical]
                 item = period.metrics.get(canonical) or MetricExtractionItem()
-                normalized[canonical] = normalize_value(
-                    item.value, period.unit, spec.unit
+                normalized_value = normalize_value(
+                    item.value, period.unit, TARGET_UNIT
                 )
-                quotes[canonical] = item.source_quote
-
-            # Apply formulas only for metrics that came back as null but whose
-            # formula inputs are present.
-            for canonical, formula in formulas.items():
-                if normalized.get(canonical) is not None:
-                    continue
-                derived = safe_formula_eval(formula, normalized)
-                if derived is not None:
-                    normalized[canonical] = derived
-                    quotes[canonical] = (
-                        f"derived via formula: {formula}"
-                    )
-
-            for canonical, spec in spec_by_name.items():
-                value = normalized.get(canonical)
-                if value is not None:
+                if normalized_value is not None:
                     extracted_count += 1
                 rows.append(
                     MetricInput(
                         ticker=pub.ticker,
                         reporting_date=period.reporting_date,
                         period_type=period.period_type,
-                        reporting_standard=period.reporting_standard,
+                        reporting_standard=storage_standard,
                         metric_name=canonical,
-                        value=value,
+                        value=normalized_value,
                         currency=period.currency,
                         unit=spec.unit,
                         source_document_id=primary_doc.document_id,

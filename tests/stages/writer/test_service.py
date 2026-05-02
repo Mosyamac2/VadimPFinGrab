@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from openpyxl import load_workbook
 
-from edx.config import TickerEntry
+from edx.config import TickerEntry, TickersConfig
 from edx.stages.writer.service import WriterService
 from edx.storage import (
     Database,
@@ -111,6 +111,24 @@ def _seed(db: Database) -> None:
         )
 
 
+_TICKERS_CONFIG = TickersConfig(
+    tickers=[
+        TickerEntry(
+            ticker="SBER",
+            e_disclosure_id="1",
+            name="Sberbank",
+            profile="bank",
+        ),
+        TickerEntry(
+            ticker="GAZP",
+            e_disclosure_id="2",
+            name="Gazprom",
+            profile="non_bank",
+        ),
+    ]
+)
+
+
 @pytest.fixture
 def workspace(tmp_path: Path) -> tuple[Database, Path]:
     db = Database(tmp_path / "state.sqlite")
@@ -131,6 +149,7 @@ def test_writer_emits_expected_sheet_counts(
             EventsRepo(db, conn),
             QAIssuesRepo(db, conn),
             TickersRepo(db, conn),
+            tickers_config=_TICKERS_CONFIG,
             excel_path=excel_path,
         )
         out = service.run()
@@ -164,6 +183,7 @@ def test_writer_marks_validated_publications_as_written(
             EventsRepo(db, conn),
             QAIssuesRepo(db, conn),
             TickersRepo(db, conn),
+            tickers_config=_TICKERS_CONFIG,
             excel_path=excel_path,
         )
         service.run()
@@ -184,6 +204,7 @@ def test_writer_idempotent_second_run(
             EventsRepo(db, conn),
             QAIssuesRepo(db, conn),
             TickersRepo(db, conn),
+            tickers_config=_TICKERS_CONFIG,
             excel_path=excel_path,
         )
         first = service.run()

@@ -322,11 +322,23 @@ def _classify_then_extract(
     fake_ocr: _FakeOCRProvider,
 ) -> dict[str, object]:
     """Run Classifier and TextExtractor end-to-end, return outcome+payload."""
-    from edx.config import MetricsConfig, MetricSpec
+    from edx.config import MetricsConfig, MetricSpec, MetricsProfile
 
     metrics_config = MetricsConfig(
-        metrics=[MetricSpec(canonical_name="revenue")],
-        reporting_priority=["IFRS", "RSBU"],
+        profiles={
+            "non_bank": MetricsProfile(
+                metrics={"revenue": MetricSpec(synonyms=["Выручка"])},
+                reporting_priority=["IFRS", "RSBU"],
+            ),
+            "bank": MetricsProfile(
+                metrics={
+                    "net_interest_income": MetricSpec(
+                        synonyms=["Чистый процентный доход"]
+                    )
+                },
+                reporting_priority=["IFRS", "RSBU"],
+            ),
+        }
     )
 
     with closing(db.connect()) as conn:

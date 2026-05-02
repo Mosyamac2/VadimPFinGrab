@@ -70,10 +70,22 @@ class MetaSnapshot:
 
 
 @dataclass(frozen=True)
+class TickerExportRow:
+    """Patch 19: emitted on the ``tickers`` sheet so analysts can see which
+    metric set each issuer was scored against."""
+
+    ticker: str
+    name: str
+    profile: str  # bank | non_bank
+    e_disclosure_id: str
+
+
+@dataclass(frozen=True)
 class WitrineSnapshot:
     metrics: list[MetricExportRow] = field(default_factory=list)
     events: list[EventExportRow] = field(default_factory=list)
     qa_issues: list[QAIssueExportRow] = field(default_factory=list)
+    tickers: list[TickerExportRow] = field(default_factory=list)
     meta: MetaSnapshot | None = None
 
 
@@ -105,6 +117,12 @@ QA_ISSUES_HEADERS: Final[tuple[str, ...]] = (
     "message",
     "created_at",
 )
+TICKERS_HEADERS: Final[tuple[str, ...]] = (
+    "ticker",
+    "name",
+    "profile",
+    "e_disclosure_id",
+)
 
 
 class ExcelWriter:
@@ -119,6 +137,7 @@ class ExcelWriter:
 
         self._write_metrics(wb, snapshot.metrics)
         self._write_events(wb, snapshot.events)
+        self._write_tickers(wb, snapshot.tickers)
         self._write_meta(wb, snapshot.meta)
         self._write_qa_issues(wb, snapshot.qa_issues)
 
@@ -190,6 +209,18 @@ class ExcelWriter:
                 ws.cell(row=row_idx, column=1, value=key)
                 ws.cell(row=row_idx, column=2, value=value)
         _finalise_sheet(ws, freeze=False)
+
+    def _write_tickers(
+        self, wb: Workbook, rows: list[TickerExportRow]
+    ) -> None:
+        ws = wb.create_sheet("tickers")
+        _write_headers(ws, TICKERS_HEADERS)
+        for row_idx, row in enumerate(rows, start=2):
+            ws.cell(row=row_idx, column=1, value=row.ticker)
+            ws.cell(row=row_idx, column=2, value=row.name)
+            ws.cell(row=row_idx, column=3, value=row.profile)
+            ws.cell(row=row_idx, column=4, value=row.e_disclosure_id)
+        _finalise_sheet(ws)
 
     def _write_qa_issues(
         self, wb: Workbook, rows: list[QAIssueExportRow]

@@ -27,5 +27,6 @@ def build_writer_service(
         events_repo=events_repo,
         qa_issues_repo=qa_issues_repo,
         tickers_repo=tickers_repo,
+        tickers_config=settings.tickers,
         excel_path=settings.app.paths.excel_path,
     )

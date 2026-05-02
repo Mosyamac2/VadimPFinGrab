@@ -17,6 +17,7 @@ def build_validator_service(
         publications_repo=publications_repo,
         metrics_repo=metrics_repo,
         qa_issues_repo=qa_issues_repo,
+        metrics_config=settings.metrics,
+        tickers_config=settings.tickers,
         completeness_threshold=settings.app.validator.completeness_threshold,
-        metrics_per_period=len(settings.metrics.metrics),
     )

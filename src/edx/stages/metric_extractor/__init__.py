@@ -1,7 +1,6 @@
 """Metric Extractor stage: structured financial metric extraction via LLM."""
 
 from edx.stages.metric_extractor.factory import build_metric_extractor_service
-from edx.stages.metric_extractor.formula import safe_formula_eval
 from edx.stages.metric_extractor.models import (
     MetricExtractionItem,
     MetricExtractionResult,
@@ -25,5 +24,4 @@ __all__ = [
     "build_metric_extractor_service",
     "build_system_prompt",
     "normalize_value",
-    "safe_formula_eval",
 ]

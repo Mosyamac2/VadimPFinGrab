@@ -23,14 +23,32 @@ def test_load_reference_configs(tmp_path: Path) -> None:
     settings = load_all(REPO_CONFIG_DIR, env_file=tmp_path / "missing.env")
     assert isinstance(settings, AppSettings)
     assert settings.app.mode.backfill_years == 3
-    assert settings.metrics.reporting_priority == ["IFRS", "RSBU"]
-    assert {m.canonical_name for m in settings.metrics.metrics} == {
+    # Patch 19: metrics.yaml is split into per-issuer profiles.
+    non_bank = settings.metrics.for_profile("non_bank")
+    bank = settings.metrics.for_profile("bank")
+    assert non_bank.reporting_priority == ["IFRS", "RSBU", "ISSUER"]
+    assert set(non_bank.metrics) == {
         "revenue",
         "ebitda",
         "net_income",
         "total_assets",
         "total_debt",
     }
+    assert set(bank.metrics) == {
+        "net_interest_income",
+        "net_fee_income",
+        "net_income",
+        "total_assets",
+        "total_equity",
+    }
+    # Sanity: at least one synonym is the real-fixture-anchored line.
+    assert "Выручка" in non_bank.metrics["revenue"].synonyms
+    assert (
+        "Чистые процентные доходы"
+        in bank.metrics["net_interest_income"].synonyms
+    )
+    # only_in_sources lifted from the YAML.
+    assert non_bank.metrics["ebitda"].only_in_sources == ["IFRS", "ISSUER"]
     assert any(et.code == "other" for et in settings.event_types.event_types)
     assert settings.llm.primary.model == "claude-sonnet-4-6"
 
@@ -60,7 +78,8 @@ def test_load_invalid_reporting_priority(tmp_path: Path) -> None:
     _copy_reference_configs(tmp_path)
     metrics_path = tmp_path / "metrics.yaml"
     data = yaml.safe_load(metrics_path.read_text(encoding="utf-8"))
-    data["reporting_priority"] = ["GAAP"]
+    # Patch 19 — reporting_priority lives inside each profile.
+    data["profiles"]["non_bank"]["reporting_priority"] = ["GAAP"]
     metrics_path.write_text(yaml.safe_dump(data), encoding="utf-8")
 
     with pytest.raises(ConfigLoadError) as excinfo:
@@ -89,11 +108,18 @@ def test_load_top_level_not_mapping(tmp_path: Path) -> None:
 def test_load_is_not_cached(tmp_path: Path) -> None:
     _copy_reference_configs(tmp_path)
     s1 = load_all(tmp_path)
-    # mutate after first load
+    # mutate after first load: flip priority order on the non_bank profile.
     metrics_path = tmp_path / "metrics.yaml"
     data = yaml.safe_load(metrics_path.read_text(encoding="utf-8"))
-    data["reporting_priority"] = ["RSBU", "IFRS"]
+    data["profiles"]["non_bank"]["reporting_priority"] = ["RSBU", "IFRS"]
     metrics_path.write_text(yaml.safe_dump(data), encoding="utf-8")
     s2 = load_all(tmp_path)
-    assert s1.metrics.reporting_priority == ["IFRS", "RSBU"]
-    assert s2.metrics.reporting_priority == ["RSBU", "IFRS"]
+    assert s1.metrics.for_profile("non_bank").reporting_priority == [
+        "IFRS",
+        "RSBU",
+        "ISSUER",
+    ]
+    assert s2.metrics.for_profile("non_bank").reporting_priority == [
+        "RSBU",
+        "IFRS",
+    ]

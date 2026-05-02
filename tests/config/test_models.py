@@ -17,12 +17,35 @@ from edx.config import (
     LLMConfig,
     MetricsConfig,
     MetricSpec,
+    MetricsProfile,
     OCRConfig,
     OpenRouterProviderConfig,
     Secrets,
     TickerEntry,
     TickersConfig,
 )
+
+
+def _two_profile_metrics_config() -> MetricsConfig:
+    """Patch 19: minimal MetricsConfig that satisfies the both-profiles
+    invariant. Used by tests that need a valid object without exercising
+    the metric catalogue."""
+    return MetricsConfig(
+        profiles={
+            "non_bank": MetricsProfile(
+                metrics={"revenue": MetricSpec(synonyms=["Выручка"])},
+                reporting_priority=["IFRS", "RSBU"],
+            ),
+            "bank": MetricsProfile(
+                metrics={
+                    "net_interest_income": MetricSpec(
+                        synonyms=["Чистый процентный доход"]
+                    )
+                },
+                reporting_priority=["IFRS", "RSBU"],
+            ),
+        }
+    )
 
 
 def test_app_config_defaults_match_tz() -> None:
@@ -83,37 +106,75 @@ def test_tickers_config_extra_forbidden() -> None:
         TickersConfig.model_validate({"tickers": [], "junk": 1})
 
 
-def test_metrics_config_invalid_priority_raises() -> None:
+def test_metrics_config_rejects_legacy_flat_schema() -> None:
+    """Patch 19: pre-Patch-19 ``metrics:`` / ``reporting_priority:`` at the
+    top level fails fast with a clear message instead of silently dropping
+    metrics."""
+    with pytest.raises(ValidationError) as exc_info:
+        MetricsConfig.model_validate(
+            {"metrics": [], "reporting_priority": ["IFRS"]}
+        )
+    assert "pre-Patch-19" in str(exc_info.value) or "profiles" in str(
+        exc_info.value
+    )
+
+
+def test_metrics_config_requires_both_profiles() -> None:
     with pytest.raises(ValidationError):
         MetricsConfig.model_validate(
-            {"metrics": [], "reporting_priority": ["GAAP"]}
+            {
+                "profiles": {
+                    "non_bank": {
+                        "metrics": {"revenue": {"synonyms": ["Выручка"]}},
+                        "reporting_priority": ["IFRS"],
+                    }
+                }
+            }
         )
 
 
 def test_metrics_config_extra_field_raises() -> None:
     with pytest.raises(ValidationError):
         MetricsConfig.model_validate(
-            {"metrics": [], "reporting_priority": ["IFRS"], "unknown": 1}
+            {
+                "profiles": {
+                    "non_bank": {
+                        "metrics": {"revenue": {"synonyms": ["Выручка"]}},
+                        "reporting_priority": ["IFRS"],
+                    },
+                    "bank": {
+                        "metrics": {"net_income": {"synonyms": ["Прибыль"]}},
+                        "reporting_priority": ["IFRS"],
+                    },
+                },
+                "unknown": 1,
+            }
         )
 
 
 def test_metric_spec_full_round_trip() -> None:
     spec = MetricSpec(
-        canonical_name="revenue",
-        synonyms_ifrs=["Revenue"],
-        synonyms_rsbu=["Выручка"],
-        unit="thousands",
-        currency="USD",
-        formula="x+y",
+        synonyms=["Revenue", "Выручка"],
+        unit="RUB",
+        scale_hints=["млн руб.", "тыс. руб."],
+        only_in_sources=["IFRS", "ISSUER"],
+        aggregation_hint="sum 1410+1510",
     )
-    assert spec.formula == "x+y"
-    assert spec.unit == "thousands"
-    assert spec.currency == "USD"
+    assert spec.synonyms == ["Revenue", "Выручка"]
+    assert spec.unit == "RUB"
+    assert spec.only_in_sources == ["IFRS", "ISSUER"]
+    assert spec.aggregation_hint == "sum 1410+1510"
 
 
-def test_metric_spec_currency_length_strict() -> None:
+def test_metric_spec_requires_at_least_one_synonym() -> None:
     with pytest.raises(ValidationError):
-        MetricSpec(canonical_name="x", currency="DOLLAR")
+        MetricSpec(synonyms=[])
+
+
+def test_metrics_config_for_profile_returns_profile() -> None:
+    cfg = _two_profile_metrics_config()
+    assert "revenue" in cfg.for_profile("non_bank").metrics
+    assert "net_interest_income" in cfg.for_profile("bank").metrics
 
 
 def test_event_types_config_requires_other_when_nonempty() -> None:
@@ -176,7 +237,7 @@ def test_app_settings_to_masked_dict_hides_secrets(
     settings = AppSettings(
         app=AppConfig(),
         tickers=TickersConfig(),
-        metrics=MetricsConfig(metrics=[], reporting_priority=["IFRS", "RSBU"]),
+        metrics=_two_profile_metrics_config(),
         event_types=EventTypesConfig(),
         llm=LLMConfig(),
         ocr=OCRConfig(),

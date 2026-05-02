@@ -21,7 +21,13 @@ from edx.config.llm_config import (
     OpenRouterProviderConfig,
 )
 from edx.config.loader import ConfigLoadError, load_all
-from edx.config.metrics_config import MetricsConfig, MetricSpec, ReportingStandard
+from edx.config.metrics_config import (
+    MetricsConfig,
+    MetricSpec,
+    MetricsProfile,
+    ProfileName,
+    ReportingStandard,
+)
 from edx.config.ocr_config import OCRConfig
 from edx.config.secrets import Secrets
 from edx.config.settings import AppSettings
@@ -44,9 +50,11 @@ __all__ = [
     "LLMConfig",
     "MetricSpec",
     "MetricsConfig",
+    "MetricsProfile",
     "OCRConfig",
     "OpenRouterProviderConfig",
     "OrchestratorConfig",
+    "ProfileName",
     "ReportingStandard",
     "Secrets",
     "TextExtractorConfig",
