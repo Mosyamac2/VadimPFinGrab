@@ -171,6 +171,11 @@ class MetricExtractorConfig(BaseModel):
     pdf_input_standards: tuple[
         Literal["IFRS", "RSBU", "ISSUER"], ...
     ] = ("IFRS",)
+    # Patch 30: cap on the balance-anchor-trimmed RSBU slice. 200k
+    # comfortably holds balance + P&L + capital changes + notes for any
+    # real Russian issuer; raise only if the LLM complains the section
+    # was cut mid-form.
+    balance_trim_max_chars: int = Field(default=200_000, gt=0)
 
 
 class TextExtractorConfig(BaseModel):

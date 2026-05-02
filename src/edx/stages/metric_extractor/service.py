@@ -31,6 +31,9 @@ from edx.stages.metric_extractor.models import (
 )
 from edx.stages.metric_extractor.prompts import build_system_prompt
 from edx.stages.metric_extractor.schema import build_metric_extraction_schema
+from edx.stages.text_extractor.balance_anchor import (
+    extract_balance_sheet_onwards,
+)
 from edx.stages.text_extractor.issuer_trim import extract_section_1_4
 from edx.storage import (
     DocumentRow,
@@ -89,6 +92,11 @@ class MetricExtractorService:
         # RSBU-формы и Issuer Report шлём как text).
         scan_ratio_threshold: float = 0.10,
         pdf_input_standards: tuple[str, ...] = ("IFRS",),
+        # Patch 30: cap on the balance-anchor-trimmed RSBU slice. 200k
+        # comfortably holds balance + P&L + capital changes + notes for
+        # any real Russian issuer; raise only if the LLM complains the
+        # section was cut mid-form.
+        balance_trim_max_chars: int = 200_000,
     ) -> None:
         self.llm_provider = llm_provider
         self.publications_repo = publications_repo
@@ -104,6 +112,7 @@ class MetricExtractorService:
         self.issuer_trim_max_chars = issuer_trim_max_chars
         self.scan_ratio_threshold = scan_ratio_threshold
         self.pdf_input_standards = tuple(pdf_input_standards)
+        self.balance_trim_max_chars = balance_trim_max_chars
         # Cache prompt+schema per (profile, source_standard). At most
         # 2 profiles × 3 standards = 6 entries.
         self._prompt_cache: dict[tuple[str, str], str] = {}
@@ -471,6 +480,40 @@ class MetricExtractorService:
                     doc_text = trim.content
                 # ``trim.content is None`` → fall back to the full doc_text
                 # (graceful degradation, with the warning above logged).
+            elif standard == "RSBU":
+                # Patch 30: trim the audit-opinion preamble (Кэпт / Б1 /
+                # ДРТ / Делойт ~5–30k chars) by cutting to the first
+                # balance-form anchor. Fail-soft: when no anchor is found
+                # we emit a warning and keep the full doc_text — better
+                # noisy input than zero coverage.
+                btrim = extract_balance_sheet_onwards(
+                    doc_text, max_chars=self.balance_trim_max_chars
+                )
+                if btrim.content is not None:
+                    self._log.info(
+                        "metric_extract_balance_anchor_trimmed",
+                        publication_id=pub.publication_id,
+                        document_id=doc.document_id,
+                        anchor_label=btrim.anchor_label_seen,
+                        chars_after_trim=len(btrim.content),
+                        chars_before=len(doc_text),
+                    )
+                    for warning in btrim.warnings:
+                        self._log.warning(
+                            "metric_extract_balance_trim_capped",
+                            publication_id=pub.publication_id,
+                            document_id=doc.document_id,
+                            detail=warning,
+                        )
+                    doc_text = btrim.content
+                else:
+                    for warning in btrim.warnings:
+                        self._log.warning(
+                            "metric_extract_balance_anchor_missing",
+                            publication_id=pub.publication_id,
+                            document_id=doc.document_id,
+                            detail=warning,
+                        )
             sections.append(f"\n=== Документ: {doc.relative_path} ===")
             sections.append(doc_text)
         return "\n".join(sections)

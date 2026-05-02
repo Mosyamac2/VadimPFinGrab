@@ -107,6 +107,14 @@ metric_extractor:
   # coverage 0% via Anthropic vision. ISSUER text is trimmed by Patch 21
   # so it always goes via text-path regardless. Widen at your own risk.
   pdf_input_standards: ["IFRS"]
+  # Patch 30: when the RSBU document opens with a multi-page audit
+  # opinion (Кэпт / Б1 / ДРТ / Делойт preamble), trim everything before
+  # the first balance-form anchor («БУХГАЛТЕРСКИЙ БАЛАНС» /
+  # «Бухгалтерский баланс» / «Форма по ОКУД 0710001» /
+  # «ОТЧЕТ О ФИНАНСОВЫХ РЕЗУЛЬТАТАХ»). 200k chars holds even the
+  # bulkiest combined form set; raise only if the LLM complains the
+  # section was cut mid-form.
+  balance_trim_max_chars: 200000
 
 validator:
   # Publications below this metric-coverage ratio are flagged is_incomplete=1
