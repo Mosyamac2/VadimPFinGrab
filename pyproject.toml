@@ -40,6 +40,11 @@ dependencies = [
     "google-api-python-client>=2.130",
     "google-auth>=2.32",
     "google-auth-oauthlib>=1.2",
+    # Pinned explicitly (Patch 24): it ships transitively via
+    # google-api-python-client, but Drive proxy support imports it by name,
+    # so we want it locked in our resolver.
+    "google-auth-httplib2>=0.2",
+    "httplib2>=0.22",
 ]
 
 [project.optional-dependencies]

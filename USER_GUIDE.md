@@ -474,6 +474,74 @@ tail -n 200 /opt/edx/logs/pipeline.log | grep '"level": "error"'
 
 ---
 
+## HTTPS-прокси для Anthropic / Google Drive (Patch 24)
+
+Если ваш VPS не имеет прямого доступа к Anthropic API и Google Drive
+(блокировки по странам, обычная история для российских VPS), а наружу
+выходите через локальный туннель (vless / SOCKS / HTTP-прокси), то
+нужно разделить трафик: LLM и Drive — через туннель, e-disclosure —
+напрямую.
+
+### 1. Поднимите прокси-клиент локально на VPS
+
+Любой клиент vless/sing-box/xray, слушающий HTTP-прокси на
+`127.0.0.1:10809` (или другом порту). Проверка:
+
+```bash
+ss -tlnp | grep 10809                             # должен быть LISTEN
+curl -x http://127.0.0.1:10809 -i \
+     https://api.anthropic.com/v1/messages | head -3
+# ожидается HTTP/2 405 (Method Not Allowed без POST/auth) — значит
+# до Anthropic долетели через туннель
+```
+
+### 2. Включите перенаправление через env-переменные
+
+```bash
+echo 'export HTTPS_PROXY=http://127.0.0.1:10809' >> ~/.bashrc
+echo 'export HTTP_PROXY=http://127.0.0.1:10809'  >> ~/.bashrc
+echo 'export NO_PROXY=e-disclosure.ru,www.e-disclosure.ru,localhost,127.0.0.1' >> ~/.bashrc
+source ~/.bashrc
+```
+
+| Кому идём | Куда уходит | Почему |
+|---|---|---|
+| Anthropic SDK / OpenRouter | через прокси | `httpx` уважает `HTTPS_PROXY` + `NO_PROXY` |
+| Google Drive API | через прокси | Patch 24 — `httplib2.proxy_info_from_environment` ловит env, `NO_PROXY` тоже |
+| e-disclosure (Playwright Chromium) | напрямую | Chromium env-переменные не читает по умолчанию |
+| e-disclosure (httpx-бэкенд, если когда-то переключите) | напрямую | благодаря `NO_PROXY=e-disclosure.ru` |
+
+После старта `edx update` в логе появится строчка
+`drive_proxy_configured` с заполненными `proxy_url` / `no_proxy` —
+маркер, что Patch 24 подхватил env.
+
+### 3. Cron / systemd
+
+`~/.bashrc` cron не подхватывает. В юните:
+
+```ini
+[Service]
+Environment="HTTPS_PROXY=http://127.0.0.1:10809"
+Environment="HTTP_PROXY=http://127.0.0.1:10809"
+Environment="NO_PROXY=e-disclosure.ru,www.e-disclosure.ru,localhost,127.0.0.1"
+```
+
+или через `EnvironmentFile=/etc/edx/proxy.env` (тот же ключ-значение
+без `export`).
+
+### Если всё равно `Connection refused` на Anthropic
+
+- Проверьте, что `curl -x http://127.0.0.1:10809 https://api.anthropic.com/...`
+  работает напрямую из той же шелл-сессии.
+- Сравните выходной IP: `curl -x http://127.0.0.1:10809 https://ifconfig.me`
+  должен **отличаться** от `curl https://ifconfig.me`. Если совпадают —
+  vless-клиент маршрутизирует direct, а не туннелирует. Чините конфиг
+  vless (outbounds / routing).
+- Если выходной IP другой, но Anthropic всё равно блокирует — выходная
+  нода тоже в стране-блокированной зоне. Смените сервер.
+
+---
+
 ## ServicePipe / headless Chromium
 
 e-disclosure стоит за анти-ботом ServicePipe. Он сверяет **TLS-fingerprint
