@@ -1,7 +1,8 @@
-"""ClassifierService end-to-end against synthetic PDFs."""
+"""ClassifierService end-to-end against synthetic and real-issuer PDFs."""
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from contextlib import closing
 from pathlib import Path
@@ -17,6 +18,8 @@ from edx.storage import (
     PublicationsRepo,
     TickersRepo,
 )
+
+REAL_FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "pdf"
 
 _METRICS_CONFIG = MetricsConfig(
     metrics=[MetricSpec(canonical_name="revenue")],
@@ -84,7 +87,7 @@ def test_classifies_machine_readable_ifrs_pdf(
             documents_repo,
             raw_dir=raw_dir,
             metrics_config=_METRICS_CONFIG,
-            min_text_chars=200,
+            min_text_chars_per_page=50,
             first_pages_to_inspect=1,
         )
         pub = publications_repo.get_by_id(pub_id)
@@ -139,7 +142,7 @@ def test_scan_pdf_is_marked_not_machine_readable(
             documents_repo,
             raw_dir=raw_dir,
             metrics_config=_METRICS_CONFIG,
-            min_text_chars=200,
+            min_text_chars_per_page=50,
             first_pages_to_inspect=1,
         )
         pub = publications_repo.get_by_id(pub_id)
@@ -192,7 +195,7 @@ def test_non_pdf_documents_skipped(
             documents_repo,
             raw_dir=raw_dir,
             metrics_config=_METRICS_CONFIG,
-            min_text_chars=200,
+            min_text_chars_per_page=50,
             first_pages_to_inspect=1,
         )
         pub = publications_repo.get_by_id(pub_id)
@@ -241,7 +244,7 @@ def test_publication_with_unreadable_pdf_continues_pipeline(
             documents_repo,
             raw_dir=raw_dir,
             metrics_config=_METRICS_CONFIG,
-            min_text_chars=200,
+            min_text_chars_per_page=50,
             first_pages_to_inspect=1,
         )
         pub = publications_repo.get_by_id(pub_id)
@@ -255,3 +258,122 @@ def test_publication_with_unreadable_pdf_continues_pipeline(
     assert outcomes[0].machine_readable_count == 0
     assert outcomes[0].scan_count == 0
     assert pub_after is not None and pub_after.status == "classified"
+
+
+def _seed_pub_with_real_pdf(
+    tmp_path: Path,
+    *,
+    src_pdf: Path,
+    rel_dest: str = "_unpacked/r.pdf",
+    pub_id: str = "pub-real",
+) -> tuple[Database, Path, str]:
+    """Set up a workspace whose pub-1 directory contains a real fixture PDF."""
+    db = Database(tmp_path / "state.sqlite")
+    db.migrate()
+    raw_dir = tmp_path / "raw"
+    pub_dir = raw_dir / "SBER" / pub_id
+    pub_dir.mkdir(parents=True)
+    (pub_dir / rel_dest).parent.mkdir(parents=True, exist_ok=True)
+    (pub_dir / rel_dest).write_bytes(src_pdf.read_bytes())
+
+    with closing(db.connect()) as conn:
+        TickersRepo(db, conn).upsert_from_config(
+            [TickerEntry(ticker="SBER", e_disclosure_id="1", name="Sberbank")]
+        )
+        pubs = PublicationsRepo(db, conn)
+        pubs.upsert_discovered(
+            publication_id=pub_id,
+            ticker="SBER",
+            publication_type="report",
+            publication_date="2026-04-01",
+            source_url="https://example.test/r.zip",
+        )
+        for status in ("downloaded", "unpacked"):
+            pubs.mark_status(pub_id, status)  # type: ignore[arg-type]
+        DocumentsRepo(db, conn).add_documents(
+            pub_id,
+            [
+                DocumentInput(
+                    relative_path=rel_dest,
+                    file_hash="real-h",
+                    mime_type="application/pdf",
+                )
+            ],
+        )
+    return db, raw_dir, pub_id
+
+
+def _classify(db: Database, raw_dir: Path, pub_id: str) -> None:
+    with closing(db.connect()) as conn:
+        publications_repo = PublicationsRepo(db, conn)
+        documents_repo = DocumentsRepo(db, conn)
+        service = ClassifierService(
+            publications_repo,
+            documents_repo,
+            raw_dir=raw_dir,
+            metrics_config=_METRICS_CONFIG,
+            min_text_chars_per_page=50,
+            first_pages_to_inspect=3,
+        )
+        pub = publications_repo.get_by_id(pub_id)
+        assert pub is not None
+        service.run([pub])
+
+
+def test_classifier_writes_pages_classification_for_sber_rpbu_hybrid(
+    tmp_path: Path,
+) -> None:
+    """Patch 18: SBER RSBU 9M 2025 → text=4, scan=13, JSON populated."""
+    db, raw_dir, pub_id = _seed_pub_with_real_pdf(
+        tmp_path, src_pdf=REAL_FIXTURES / "sber_rpbu_9m2025.pdf"
+    )
+    _classify(db, raw_dir, pub_id)
+    with closing(db.connect()) as conn:
+        docs = DocumentsRepo(db, conn).list_for_publication(pub_id)
+    assert len(docs) == 1
+    doc = docs[0]
+    assert doc.text_pages_count == 4
+    assert doc.scan_pages_count == 13
+    # Aggregate flag stays True — at least one text page.
+    assert doc.is_machine_readable == 1
+    assert doc.pages_classification is not None
+    parsed = json.loads(doc.pages_classification)
+    assert len(parsed) == 17
+    text_pages = sorted(e["page"] for e in parsed if e["kind"] == "text")
+    scan_pages = sorted(e["page"] for e in parsed if e["kind"] == "scan")
+    assert text_pages == [0, 1, 2, 3]
+    assert scan_pages == list(range(4, 17))
+
+
+def test_classifier_writes_pages_classification_for_lkoh_rsbu_all_text(
+    tmp_path: Path,
+) -> None:
+    """Anti-regression: pure-text RSBU document — scan_pages_count == 0."""
+    db, raw_dir, pub_id = _seed_pub_with_real_pdf(
+        tmp_path, src_pdf=REAL_FIXTURES / "lkoh_rsbu_q1_2026.pdf"
+    )
+    _classify(db, raw_dir, pub_id)
+    with closing(db.connect()) as conn:
+        docs = DocumentsRepo(db, conn).list_for_publication(pub_id)
+    doc = docs[0]
+    assert doc.text_pages_count == 24
+    assert doc.scan_pages_count == 0
+    assert doc.is_machine_readable == 1
+    parsed = json.loads(doc.pages_classification or "[]")
+    assert all(e["kind"] == "text" for e in parsed)
+
+
+def test_classifier_writes_pages_classification_for_vtb_go_all_text(
+    tmp_path: Path,
+) -> None:
+    """Anti-regression for a different banking issuer's annual report."""
+    db, raw_dir, pub_id = _seed_pub_with_real_pdf(
+        tmp_path, src_pdf=REAL_FIXTURES / "vtb_go_2024_first30.pdf"
+    )
+    _classify(db, raw_dir, pub_id)
+    with closing(db.connect()) as conn:
+        docs = DocumentsRepo(db, conn).list_for_publication(pub_id)
+    doc = docs[0]
+    assert doc.text_pages_count == 30
+    assert doc.scan_pages_count == 0
+    assert doc.is_machine_readable == 1

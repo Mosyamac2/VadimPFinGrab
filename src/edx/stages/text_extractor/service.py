@@ -1,12 +1,23 @@
-"""Text Extractor stage: produce per-document JSON with page text + tables."""
+"""Text Extractor stage: produce per-document JSON with page text + tables.
+
+Patch 18 adds *hybrid* extraction: when the Classifier marks a document as
+machine-readable but its ``pages_classification`` lists scan pages too
+(typical for banking RSBU forms 0409806/0409807 — text narrative followed
+by scanned regulator forms), we keep the native text for the readable
+pages and OCR only the scanned ones. Pages are merged in natural order
+so the LLM downstream sees a continuous document.
+"""
 
 from __future__ import annotations
 
 import json
+import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+
+import pymupdf
 
 from edx.logging_setup import get_logger
 from edx.stages.text_extractor.models import PageText, Table
@@ -29,6 +40,9 @@ class ExtractOutcome:
     ocr_count: int
     total_chars: int
     truncated: bool
+    # Patch 18: documents that went through the native+partial-OCR path.
+    # Counted on top of ``native_count`` (a hybrid is still primarily native).
+    hybrid_count: int = 0
 
 
 class TextExtractorService:
@@ -85,6 +99,7 @@ class TextExtractorService:
 
         native = 0
         ocr = 0
+        hybrid = 0
         total_chars = 0
         truncated_any = False
         processed = 0
@@ -111,8 +126,23 @@ class TextExtractorService:
                 continue
 
             if doc.is_machine_readable == 1:
-                pages, method = self._extract_native(full_path)
-                native += 1
+                scan_indices_0 = _scan_indices(doc)
+                if scan_indices_0:
+                    pages, method = self._extract_hybrid(
+                        full_path, scan_indices_0
+                    )
+                    self._log.info(
+                        "text_extractor_ocr_partial",
+                        publication_id=pub.publication_id,
+                        document_id=doc.document_id,
+                        scan_pages=len(scan_indices_0),
+                        text_pages=doc.text_pages_count,
+                    )
+                    native += 1
+                    hybrid += 1
+                else:
+                    pages, method = self._extract_native(full_path)
+                    native += 1
             else:
                 pages, method = self._extract_ocr(full_path)
                 ocr += 1
@@ -148,6 +178,7 @@ class TextExtractorService:
             documents_processed=processed,
             native=native,
             ocr=ocr,
+            hybrid=hybrid,
             total_chars=total_chars,
             truncated=truncated_any,
         )
@@ -158,6 +189,7 @@ class TextExtractorService:
             ocr_count=ocr,
             total_chars=total_chars,
             truncated=truncated_any,
+            hybrid_count=hybrid,
         )
 
     def _extract_native(
@@ -184,6 +216,71 @@ class TextExtractorService:
     ) -> tuple[list[PageText], str]:
         pages = self.ocr_provider.recognize(pdf_path, self.ocr_langs)
         return pages, f"ocr_{self.ocr_provider.name}"
+
+    def _extract_hybrid(
+        self, pdf_path: Path, scan_indices_0: list[int]
+    ) -> tuple[list[PageText], str]:
+        """Native text for readable pages + OCR for the listed scan pages.
+
+        ``scan_indices_0`` is 0-based, sorted natural order. We build a
+        temporary single-PDF containing just those pages, route it through
+        the configured OCR provider, then splice the recognised text back
+        into the native page list at matching ``page_number``.
+        """
+        native_pages, _ = self._extract_native(pdf_path)
+        ocr_text_by_idx0 = self._ocr_subset_by_index(pdf_path, scan_indices_0)
+        merged: list[PageText] = []
+        for page in native_pages:
+            idx0 = page.page_number - 1
+            if idx0 in ocr_text_by_idx0:
+                merged.append(
+                    PageText(
+                        page_number=page.page_number,
+                        text=ocr_text_by_idx0[idx0],
+                        tables=None,
+                    )
+                )
+            else:
+                merged.append(page)
+        return merged, f"native+ocr_{self.ocr_provider.name}"
+
+    def _ocr_subset_by_index(
+        self, pdf_path: Path, scan_indices_0: list[int]
+    ) -> dict[int, str]:
+        """OCR exactly the pages at ``scan_indices_0`` (0-based) in the PDF.
+
+        Returns a ``{original_index_0 → text}`` map. Builds a temporary
+        sub-PDF so the existing :class:`OCRProvider` contract
+        (``recognize(pdf, langs) → all pages``) keeps working without
+        per-page extensions.
+        """
+        if not scan_indices_0:
+            return {}
+        sub_doc = pymupdf.open()  # type: ignore[no-untyped-call]
+        src_doc = pymupdf.open(str(pdf_path))  # type: ignore[no-untyped-call]
+        try:
+            for idx in scan_indices_0:
+                sub_doc.insert_pdf(  # type: ignore[no-untyped-call]
+                    src_doc, from_page=idx, to_page=idx
+                )
+            with tempfile.NamedTemporaryFile(
+                suffix=".pdf", delete=False
+            ) as tmp_fh:
+                tmp_path = Path(tmp_fh.name)
+            sub_doc.save(str(tmp_path))  # type: ignore[no-untyped-call]
+        finally:
+            sub_doc.close()  # type: ignore[no-untyped-call]
+            src_doc.close()  # type: ignore[no-untyped-call]
+        try:
+            ocr_pages = self.ocr_provider.recognize(tmp_path, self.ocr_langs)
+            # ``ocr_pages`` come back numbered 1..len(scan_indices_0). Map
+            # each result back to its original 0-based index in the source.
+            return {
+                scan_indices_0[i]: ocr_pages[i].text
+                for i in range(min(len(ocr_pages), len(scan_indices_0)))
+            }
+        finally:
+            tmp_path.unlink(missing_ok=True)
 
     def _normalize(self, pages: list[PageText]) -> list[PageText]:
         cleaned_texts = normalize_text(
@@ -255,3 +352,26 @@ def _is_pdf(doc: DocumentRow) -> bool:
     if doc.mime_type and doc.mime_type.startswith("application/pdf"):
         return True
     return doc.relative_path.lower().endswith(".pdf")
+
+
+def _scan_indices(doc: DocumentRow) -> list[int]:
+    """Pull the 0-based scan-page indices out of the JSON column.
+
+    Returns an empty list when the document was classified before Patch 18
+    (``pages_classification`` is ``None``) — those documents fall back to
+    the pre-Patch-18 "all native" or "all OCR" behaviour.
+    """
+    raw = doc.pages_classification
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    return [
+        int(entry["page"])
+        for entry in parsed
+        if isinstance(entry, dict)
+        and entry.get("kind") == "scan"
+        and "page" in entry
+    ]

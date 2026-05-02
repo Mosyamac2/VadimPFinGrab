@@ -48,15 +48,29 @@ class DocumentsRepo:
         report_form: str | None,
         is_machine_readable: bool | None,
         page_count: int | None,
+        pages_classification: str | None = None,
+        text_pages_count: int | None = None,
+        scan_pages_count: int | None = None,
     ) -> None:
+        """Persist Classifier outcomes for a document.
+
+        ``pages_classification`` is the JSON array of per-page text/scan
+        labels added in Patch 18 — pre-encoded by the caller so this layer
+        stays storage-only. ``text_pages_count`` / ``scan_pages_count`` are
+        derived counts cached on the row to avoid re-parsing the JSON on
+        every Text Extractor lookup.
+        """
         with self.db.transaction(self.conn):
             self.conn.execute(
                 """
                 UPDATE documents
-                   SET reporting_standard  = ?,
-                       report_form         = ?,
-                       is_machine_readable = ?,
-                       page_count          = ?
+                   SET reporting_standard    = ?,
+                       report_form           = ?,
+                       is_machine_readable   = ?,
+                       page_count            = ?,
+                       pages_classification  = ?,
+                       text_pages_count      = ?,
+                       scan_pages_count      = ?
                  WHERE document_id = ?
                 """,
                 (
@@ -64,6 +78,9 @@ class DocumentsRepo:
                     report_form,
                     int(is_machine_readable) if is_machine_readable is not None else None,
                     page_count,
+                    pages_classification,
+                    text_pages_count,
+                    scan_pages_count,
                     document_id,
                 ),
             )
@@ -120,4 +137,7 @@ def _row_to_document(row: sqlite3.Row) -> DocumentRow:
         file_hash=row["file_hash"],
         is_primary_for_period=row["is_primary_for_period"],
         text_extract_path=row["text_extract_path"],
+        pages_classification=row["pages_classification"],
+        text_pages_count=row["text_pages_count"],
+        scan_pages_count=row["scan_pages_count"],
     )

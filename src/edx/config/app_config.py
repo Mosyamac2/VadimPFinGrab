@@ -90,10 +90,13 @@ class ClassifierConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    # Minimum total characters across the first inspected pages required for a
-    # PDF to be considered machine-readable. Below this, we treat it as a scan.
+    # Patch 18 — primary knob: a PDF page is "text" when ``pymupdf.get_text``
+    # returns at least this many non-whitespace characters; otherwise it's a
+    # "scan" and the Text Extractor will route it through OCR.
+    min_text_chars_per_page: int = Field(default=50, ge=1)
+    # Deprecated by Patch 18 (kept loadable for back-compat with older
+    # ``app.yaml`` files; no longer consulted by the Classifier).
     min_text_chars: int = Field(default=400, ge=1)
-    # Number of pages from the beginning of the PDF to sample.
     first_pages_to_inspect: int = Field(default=3, ge=1, le=20)
 
 

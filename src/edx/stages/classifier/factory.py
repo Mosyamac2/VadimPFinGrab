@@ -18,6 +18,6 @@ def build_classifier_service(
         documents_repo=documents_repo,
         raw_dir=settings.app.paths.raw_dir,
         metrics_config=settings.metrics,
-        min_text_chars=cfg.min_text_chars,
+        min_text_chars_per_page=cfg.min_text_chars_per_page,
         first_pages_to_inspect=cfg.first_pages_to_inspect,
     )

@@ -1,7 +1,14 @@
-"""Classifier stage: enrich ``documents`` with detected fields, mark publication."""
+"""Classifier stage: enrich ``documents`` with detected fields, mark publication.
+
+Patch 18 reframes the per-document ``is_machine_readable`` boolean as the
+*aggregate* of a per-page classification (≥1 text page → 1; otherwise 0)
+and stores the full per-page list in ``documents.pages_classification`` so
+the Text Extractor can OCR scanned pages even inside an otherwise text PDF.
+"""
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,9 +22,10 @@ from edx.stages.classifier.heuristics import (
     detect_reporting_standard,
 )
 from edx.stages.classifier.pdf_inspector import (
-    count_pages,
+    DEFAULT_MIN_TEXT_CHARS_PER_PAGE,
+    PageClassification,
+    classify_pages,
     extract_first_pages_text,
-    is_machine_readable,
 )
 from edx.storage import (
     DocumentRow,
@@ -47,14 +55,14 @@ class ClassifierService:
         *,
         raw_dir: Path,
         metrics_config: MetricsConfig,
-        min_text_chars: int = 400,
+        min_text_chars_per_page: int = DEFAULT_MIN_TEXT_CHARS_PER_PAGE,
         first_pages_to_inspect: int = 3,
     ) -> None:
         self.publications_repo = publications_repo
         self.documents_repo = documents_repo
         self.raw_dir = Path(raw_dir)
         self.metrics_config = metrics_config
-        self.min_text_chars = min_text_chars
+        self.min_text_chars_per_page = min_text_chars_per_page
         self.first_pages_to_inspect = first_pages_to_inspect
         self._log = get_logger("edx.stages.classifier")
 
@@ -103,7 +111,10 @@ class ClassifierService:
                 continue
 
             try:
-                pages = count_pages(full_path)
+                page_classifications = classify_pages(
+                    full_path,
+                    min_text_chars_per_page=self.min_text_chars_per_page,
+                )
             except Exception as exc:  # noqa: BLE001 — broken PDF: skip doc, keep going
                 self._log.warning(
                     "classifier_unreadable_pdf",
@@ -113,11 +124,13 @@ class ClassifierService:
                 )
                 continue
 
-            mr = is_machine_readable(
-                full_path,
-                min_text_chars=self.min_text_chars,
-                pages=self.first_pages_to_inspect,
-            )
+            pages = len(page_classifications)
+            text_pages = [p for p in page_classifications if p.kind == "text"]
+            scan_pages = [p for p in page_classifications if p.kind == "scan"]
+            # Aggregate flag stays the same shape as before Patch 18 so
+            # downstream call-sites that only check ``is_machine_readable``
+            # keep working: any text page counts the document as readable.
+            mr = bool(text_pages)
             if mr:
                 machine_readable += 1
                 text = extract_first_pages_text(
@@ -140,6 +153,9 @@ class ClassifierService:
                 report_form=form,
                 is_machine_readable=mr,
                 page_count=pages,
+                pages_classification=_serialize_pages(page_classifications),
+                text_pages_count=len(text_pages),
+                scan_pages_count=len(scan_pages),
             )
 
         self.publications_repo.mark_status(pub.publication_id, "classified")
@@ -166,3 +182,14 @@ def _is_pdf(doc: DocumentRow) -> bool:
     ):
         return True
     return doc.relative_path.lower().endswith(PDF_SUFFIXES)
+
+
+def _serialize_pages(pages: list[PageClassification]) -> str:
+    """JSON encode the per-page classification for storage."""
+    return json.dumps(
+        [
+            {"page": p.page_index, "chars": p.char_count, "kind": p.kind}
+            for p in pages
+        ],
+        ensure_ascii=False,
+    )

@@ -97,6 +97,14 @@ class DocumentRow:
     file_hash: str
     is_primary_for_period: int = 0
     text_extract_path: str | None = None
+    # Patch 18: per-page text/scan classification. ``pages_classification``
+    # is a JSON array of ``{"page": int, "chars": int, "kind": "text"|"scan"}``
+    # or ``None`` for documents classified before Patch 18. The aggregate
+    # ``is_machine_readable`` above stays as a coarse signal (≥1 text page
+    # → 1; otherwise 0) so legacy callers keep working.
+    pages_classification: str | None = None
+    text_pages_count: int | None = None
+    scan_pages_count: int | None = None
 
 
 @dataclass(frozen=True)
