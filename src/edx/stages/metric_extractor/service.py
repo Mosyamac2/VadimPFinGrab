@@ -458,9 +458,26 @@ class MetricExtractorService:
         seen_keys_per_period: dict[
             tuple[str, str, str], int
         ] = {}
+        skipped_comparative_count = 0
         requested_count = 0
 
         for period in result.extractions:
+            # Patch 27: if the publication tells us its reporting period
+            # (Patch 17 fields), drop ``extractions`` whose period_type
+            # doesn't match. Real-world MSFO reports often carry a
+            # comparative prior-year block alongside the current period —
+            # the LLM dutifully emits both, and the prior-year rows then
+            # collide with whatever's already in ``metrics`` from the
+            # publication that *primarily* covers that prior year.
+            # Symptom on the live run: VTBR-4-1893774 (H1 2025) emitting
+            # 2024-12-31/FY/IFRS rows that already exist from doc_id=45.
+            if (
+                pub.reporting_period_year is not None
+                and pub.reporting_period_type is not None
+                and period.period_type != pub.reporting_period_type
+            ):
+                skipped_comparative_count += 1
+                continue
             period_key = (
                 period.reporting_date,
                 period.period_type,
@@ -510,6 +527,13 @@ class MetricExtractorService:
                     reporting_standard=dup_key[2],
                     duplicate_count=count,
                 )
+        if skipped_comparative_count:
+            self._log.info(
+                "metric_extract_dropped_comparative_periods",
+                publication_id=pub.publication_id,
+                expected_period_type=pub.reporting_period_type,
+                dropped_count=skipped_comparative_count,
+            )
 
         rows = list(deduped.values())
         extracted_count = sum(1 for r in rows if r.value is not None)

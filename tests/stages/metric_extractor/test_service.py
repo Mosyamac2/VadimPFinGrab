@@ -27,6 +27,7 @@ from edx.storage import (
     Database,
     DocumentInput,
     DocumentsRepo,
+    MetricInput,
     MetricsRepo,
     PublicationsRepo,
     TickersRepo,
@@ -1111,3 +1112,237 @@ async def test_patch26_duplicate_period_keeps_nonnull_when_first_has_value(
     # the second don't overwrite them.
     assert by_name["revenue"].value == 99.0
     assert by_name["net_income"].value == 5.0
+
+
+# ---------------- Patch 27 — comparative-period filter -------------------
+
+
+@pytest.mark.asyncio
+async def test_patch27_drops_comparative_period_when_pub_period_known(
+    workspace: tuple[Database, Path, Path],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An IFRS Q1 publication's LLM output usually carries the prior FY
+    block as a comparative period. Without filtering, those FY rows
+    collide with another publication's already-stored FY metrics on the
+    UNIQUE constraint. Patch 27 drops periods whose ``period_type``
+    doesn't match the publication's own ``reporting_period_type``."""
+    db, raw_dir, processed_dir = workspace
+
+    # Seed publication with a known period (Q1 2026).
+    pub_id = "pub-q1-with-comparative"
+    pub_dir = raw_dir / "SBER" / pub_id
+    pub_dir.mkdir(parents=True)
+    rel = "_unpacked/q1.pdf"
+    (pub_dir / rel).parent.mkdir(parents=True, exist_ok=True)
+    (pub_dir / rel).write_bytes(b"%PDF-fake")
+
+    with closing(db.connect()) as conn:
+        pubs = PublicationsRepo(db, conn)
+        pubs.upsert_discovered(
+            publication_id=pub_id,
+            ticker="SBER",
+            publication_type="report",
+            publication_date="2026-04-29",
+            source_url="https://example.test/r.zip",
+            report_type_code=4,
+            reporting_period_year=2026,
+            reporting_period_type="Q1",
+        )
+        for status in ("downloaded", "unpacked", "classified", "extracted"):
+            pubs.mark_status(pub_id, status)  # type: ignore[arg-type]
+        DocumentsRepo(db, conn).add_documents(
+            pub_id,
+            [DocumentInput(relative_path=rel, file_hash="hq1", mime_type="application/pdf")],
+        )
+        doc_id = DocumentsRepo(db, conn).list_for_publication(pub_id)[0].document_id
+        DocumentsRepo(db, conn).update_classification(
+            doc_id,
+            reporting_standard="IFRS",
+            report_form="balance_sheet",
+            is_machine_readable=True,
+            page_count=1,
+        )
+
+    captured: dict[str, str] = {}
+
+    def handler(req: LLMRequest) -> dict[str, Any]:
+        captured["system"] = req.system
+        return {
+            "extractions": [
+                {
+                    "reporting_date": "2026-03-31",
+                    "period_type": "Q1",   # ← matches publication
+                    "reporting_standard": "IFRS",
+                    "currency": "RUB", "unit": "ones",
+                    "metrics": {
+                        "revenue": {"value": 1000.0, "source_quote": "r"},
+                        "ebitda": {"value": 300.0, "source_quote": "e"},
+                        "net_income": {"value": 100.0, "source_quote": "ni"},
+                        "total_assets": {"value": 5000.0, "source_quote": "ta"},
+                        "total_debt": {"value": 2000.0, "source_quote": "td"},
+                    },
+                },
+                {
+                    "reporting_date": "2024-12-31",
+                    "period_type": "FY",   # ← comparative prior — must be dropped
+                    "reporting_standard": "IFRS",
+                    "currency": "RUB", "unit": "ones",
+                    "metrics": {
+                        "revenue": {"value": 4000.0, "source_quote": "rprev"},
+                        "ebitda": {"value": 1200.0, "source_quote": "eprev"},
+                        "net_income": {"value": 400.0, "source_quote": "niprev"},
+                        "total_assets": {"value": 4500.0, "source_quote": "taprev"},
+                        "total_debt": {"value": 1800.0, "source_quote": "tdprev"},
+                    },
+                },
+            ]
+        }
+
+    llm = _FakeLLM(handler=handler)
+    service, conn = _build_service(db, raw_dir, processed_dir, llm)
+    try:
+        pub = PublicationsRepo(db, conn).get_by_id(pub_id)
+        assert pub is not None
+        with caplog.at_level("INFO"):
+            await service.run([pub])
+        rows = MetricsRepo(db, conn).list_for_publication(pub_id)
+    finally:
+        conn.close()
+
+    # Only the Q1 period landed; FY-comparative was dropped.
+    period_types = {r.period_type for r in rows}
+    assert period_types == {"Q1"}
+    reporting_dates = {r.reporting_date for r in rows}
+    assert reporting_dates == {"2026-03-31"}
+    assert len(rows) == 5  # five canonical metrics, one period
+    # Operator gets a heads-up that comparative rows were dropped.
+    assert any(
+        "metric_extract_dropped_comparative_periods" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_patch27_keeps_all_periods_when_pub_period_missing(
+    workspace: tuple[Database, Path, Path],
+) -> None:
+    """If the publication has no reporting_period_year/type (rare —
+    parser couldn't recognise the listing label), we don't have a
+    yardstick to filter against. Behaviour reverts to "trust the LLM"
+    and INSERT OR REPLACE in the repo prevents UNIQUE crashes."""
+    db, raw_dir, processed_dir = workspace
+    pub_id = "pub-no-period"
+    pub_dir = raw_dir / "SBER" / pub_id
+    pub_dir.mkdir(parents=True)
+    rel = "_unpacked/r.pdf"
+    (pub_dir / rel).parent.mkdir(parents=True, exist_ok=True)
+    (pub_dir / rel).write_bytes(b"%PDF-fake")
+
+    with closing(db.connect()) as conn:
+        pubs = PublicationsRepo(db, conn)
+        pubs.upsert_discovered(
+            publication_id=pub_id, ticker="SBER", publication_type="report",
+            publication_date="2026-04-29", source_url="https://example.test/r.zip",
+            report_type_code=4,  # year/type intentionally None
+        )
+        for status in ("downloaded", "unpacked", "classified", "extracted"):
+            pubs.mark_status(pub_id, status)  # type: ignore[arg-type]
+        DocumentsRepo(db, conn).add_documents(
+            pub_id,
+            [DocumentInput(relative_path=rel, file_hash="hnp", mime_type="application/pdf")],
+        )
+        doc_id = DocumentsRepo(db, conn).list_for_publication(pub_id)[0].document_id
+        DocumentsRepo(db, conn).update_classification(
+            doc_id, reporting_standard="IFRS", report_form="balance_sheet",
+            is_machine_readable=True, page_count=1,
+        )
+
+    llm = _FakeLLM(
+        handler=lambda r: {
+            "extractions": [
+                {
+                    "reporting_date": "2025-12-31", "period_type": "FY",
+                    "reporting_standard": "IFRS", "currency": "RUB", "unit": "ones",
+                    "metrics": {
+                        "revenue": {"value": 1.0, "source_quote": "r"},
+                        "ebitda": {"value": 1.0, "source_quote": "e"},
+                        "net_income": {"value": 1.0, "source_quote": "ni"},
+                        "total_assets": {"value": 1.0, "source_quote": "ta"},
+                        "total_debt": {"value": 1.0, "source_quote": "td"},
+                    },
+                },
+            ]
+        }
+    )
+    service, conn = _build_service(db, raw_dir, processed_dir, llm)
+    try:
+        pub = PublicationsRepo(db, conn).get_by_id(pub_id)
+        assert pub is not None
+        await service.run([pub])
+        rows = MetricsRepo(db, conn).list_for_publication(pub_id)
+    finally:
+        conn.close()
+
+    # No filtering applied — the FY row landed even though the
+    # publication itself doesn't declare a period.
+    assert len(rows) == 5
+    assert {r.period_type for r in rows} == {"FY"}
+
+
+def test_patch27_repo_upsert_handles_cross_publication_collision(
+    tmp_path: Path,
+) -> None:
+    """Direct repo-level test: two publications writing the same
+    (ticker, date, period, std, metric) used to crash the second one
+    on UNIQUE. With INSERT OR REPLACE the second wins, the first row
+    is overwritten — both publications end up in 'success' state with
+    the most-recent value visible in the mart."""
+    db = Database(tmp_path / "state.sqlite")
+    db.migrate()
+    with closing(db.connect()) as conn:
+        TickersRepo(db, conn).upsert_from_config(
+            [TickerEntry(ticker="X", e_disclosure_id="1", name="X")]
+        )
+        pubs = PublicationsRepo(db, conn)
+        docs_repo = DocumentsRepo(db, conn)
+        metrics = MetricsRepo(db, conn)
+
+        for pid in ("X-old", "X-new"):
+            pubs.upsert_discovered(
+                publication_id=pid, ticker="X", publication_type="report",
+                publication_date="2026-04-01", source_url="https://x",
+            )
+            docs_repo.add_documents(
+                pid, [DocumentInput(relative_path=f"{pid}.pdf", file_hash=f"h-{pid}",
+                                   mime_type="application/pdf")],
+            )
+
+        old_doc = docs_repo.list_for_publication("X-old")[0].document_id
+        new_doc = docs_repo.list_for_publication("X-new")[0].document_id
+
+        # First publication writes a row.
+        metrics.replace_for_publication("X-old", [
+            MetricInput(ticker="X", reporting_date="2025-12-31", period_type="FY",
+                        reporting_standard="IFRS", metric_name="revenue",
+                        value=100.0, currency="RUB", unit="ones",
+                        source_document_id=old_doc),
+        ])
+        # Second publication tries the same key — used to raise IntegrityError.
+        metrics.replace_for_publication("X-new", [
+            MetricInput(ticker="X", reporting_date="2025-12-31", period_type="FY",
+                        reporting_standard="IFRS", metric_name="revenue",
+                        value=200.0, currency="RUB", unit="ones",
+                        source_document_id=new_doc),
+        ])
+
+        # Newer publication wins; only one row in the table.
+        all_rows = list(conn.execute(
+            "SELECT value, source_document_id FROM metrics "
+            "WHERE ticker='X' AND reporting_date='2025-12-31' "
+            "AND period_type='FY' AND reporting_standard='IFRS' "
+            "AND metric_name='revenue'"
+        ))
+        assert len(all_rows) == 1
+        assert all_rows[0][0] == 200.0
+        assert all_rows[0][1] == new_doc

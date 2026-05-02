@@ -21,8 +21,20 @@ class MetricsRepo:
     ) -> int:
         """Atomically delete all metrics linked to ``publication_id`` and insert ``rows``.
 
-        If any insert fails (e.g. CHECK violation), the transaction is rolled back
-        and the original metrics remain untouched.
+        Patch 27: uses ``INSERT OR REPLACE`` so a row that collides with
+        the UNIQUE(ticker, reporting_date, period_type, reporting_standard,
+        metric_name) key from *another* publication doesn't crash the
+        whole publication. The collision is real on e-disclosure: an
+        IFRS Q1 report routinely carries a ``comparative prior``
+        2024-FY block alongside the current Q1 numbers; if another
+        publication already wrote those 2024-FY rows, a strict INSERT
+        would crash the entire publication. With OR REPLACE the
+        most-recently-extracted row wins; the source_document_id is
+        also updated so the Excel mart shows the latest source URL.
+
+        If any insert fails for *other* reasons (CHECK violation,
+        type mismatch), the transaction is rolled back and the
+        original metrics remain untouched.
         """
         new_rows = list(rows)
         timestamp = now_iso()
@@ -39,7 +51,7 @@ class MetricsRepo:
             for row in new_rows:
                 self.conn.execute(
                     """
-                    INSERT INTO metrics (
+                    INSERT OR REPLACE INTO metrics (
                         ticker, reporting_date, period_type, reporting_standard,
                         metric_name, value, currency, unit, source_document_id,
                         qa_warning, extracted_at
