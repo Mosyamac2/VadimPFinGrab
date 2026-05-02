@@ -178,6 +178,80 @@ def test_scan_pdf_is_marked_not_machine_readable(
     assert doc.report_form == "other"
 
 
+def test_patch25_scan_pdf_with_type_code_keeps_deterministic_standard(
+    tmp_path: Path,
+    make_scan_pdf: Callable[[Path], Path],
+) -> None:
+    """Patch 25: a scanned PDF whose publication has ``report_type_code=3``
+    must still be classified as RSBU. Without the fix, banking quarterly
+    scans (type=3, fully image-based) get shoved into ``OTHER`` and the
+    Metric Extractor refuses them — the exact bug seen on the live run."""
+    db = Database(tmp_path / "state.sqlite")
+    db.migrate()
+    raw_dir = tmp_path / "raw"
+    pub_id = "pub-rsbu-scan"
+    pub_dir = raw_dir / "SBER" / pub_id
+    pub_dir.mkdir(parents=True)
+    rel = "_unpacked/scan.pdf"
+    make_scan_pdf(pub_dir / rel)
+
+    with closing(db.connect()) as conn:
+        TickersRepo(db, conn).upsert_from_config(
+            [TickerEntry(ticker="SBER", e_disclosure_id="1", name="Sberbank")]
+        )
+        pubs = PublicationsRepo(db, conn)
+        pubs.upsert_discovered(
+            publication_id=pub_id,
+            ticker="SBER",
+            publication_type="report",
+            publication_date="2026-04-01",
+            source_url="https://example.test/r.zip",
+            report_type_code=3,                  # ← this is the key input
+            report_type_label="Промежуточная бухгалтерская отчётность",
+            reporting_period_year=2026,
+            reporting_period_type="Q1",
+        )
+        for status in ("downloaded", "unpacked"):
+            pubs.mark_status(pub_id, status)  # type: ignore[arg-type]
+        DocumentsRepo(db, conn).add_documents(
+            pub_id,
+            [
+                DocumentInput(
+                    relative_path=rel,
+                    file_hash="h-scan",
+                    mime_type="application/pdf",
+                )
+            ],
+        )
+
+    with closing(db.connect()) as conn:
+        publications_repo = PublicationsRepo(db, conn)
+        documents_repo = DocumentsRepo(db, conn)
+        service = ClassifierService(
+            publications_repo,
+            documents_repo,
+            raw_dir=raw_dir,
+            metrics_config=_METRICS_CONFIG,
+            min_text_chars_per_page=50,
+            first_pages_to_inspect=1,
+        )
+        pub = publications_repo.get_by_id(pub_id)
+        assert pub is not None
+        outcomes = service.run([pub])
+        docs = documents_repo.list_for_publication(pub_id)
+
+    assert outcomes[0].scan_count == 1
+    assert outcomes[0].machine_readable_count == 0
+    doc = docs[0]
+    assert doc.is_machine_readable == 0
+    # Patch 25: RSBU stays RSBU even when the file is scan-only.
+    assert doc.reporting_standard == "RSBU"
+    # Form detection without text legitimately stays "other" — that's
+    # decoupled from reporting_standard and not used downstream for
+    # source picking.
+    assert doc.report_form == "other"
+
+
 def test_non_pdf_documents_skipped(
     tmp_path: Path,
     make_text_pdf: Callable[[Path, str], Path],

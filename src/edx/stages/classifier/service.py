@@ -136,6 +136,14 @@ class ClassifierService:
             # downstream call-sites that only check ``is_machine_readable``
             # keep working: any text page counts the document as readable.
             mr = bool(text_pages)
+            # Patch 25: deterministic type_code mapping wins regardless of
+            # scan/text status. A scanned РПБУ report is still РПБУ — the
+            # earlier "scan → OTHER" branch was a bug that silently shoved
+            # banking quarter scans (forms 0409806/0409807, fully image-
+            # based) into Metric Extractor's reject list.
+            from_url = reporting_standard_for_type_code(pub.report_type_code)
+            standard: ReportingStandardWithOther
+            form: ReportForm
             if mr:
                 machine_readable += 1
                 text = extract_first_pages_text(
@@ -145,10 +153,6 @@ class ClassifierService:
                 # over text heuristics. The Discoverer attaches it on
                 # discovery (Patch 16); only legacy rows from before
                 # Patch 17 fall through to the text-based detector.
-                from_url = reporting_standard_for_type_code(
-                    pub.report_type_code
-                )
-                standard: ReportingStandardWithOther
                 if from_url is not None:
                     standard = from_url
                     heuristic = detect_reporting_standard(
@@ -175,10 +179,17 @@ class ClassifierService:
                     standard = detect_reporting_standard(
                         text, self.metrics_config
                     )
-                form: ReportForm = detect_report_form(text)
+                form = detect_report_form(text)
             else:
                 scan_count += 1
-                standard = "OTHER"
+                # Patch 25: fall back to type_code mapping for scan-only
+                # PDFs too. Without this, a scanned RSBU/IFRS document
+                # never reaches the Metric Extractor (which selects on
+                # reporting_standard ∈ {IFRS, RSBU, ISSUER}). Form
+                # detection still degrades to "other" — without text
+                # there's nothing to match _REPORT_FORM_MARKERS on, and
+                # downstream stages don't depend on form for picking.
+                standard = from_url if from_url is not None else "OTHER"
                 form = "other"
 
             standards[standard] = standards.get(standard, 0) + 1
