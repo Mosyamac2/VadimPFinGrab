@@ -1,0 +1,27 @@
+# Template for config/tickers.yaml — copy to tickers.yaml and fill in.
+#
+# Workflow (Patch 20):
+#   1. Add an entry below per issuer with `e_disclosure_id: REPLACE_ME`.
+#   2. Run `python tools/find_e_disclosure_ids.py` to suggest ids by
+#      name match against the e-disclosure search page.
+#   3. Run `python tools/validate_tickers.py [--strict]` to probe each
+#      (ticker, type∈{2,3,4,5}) combination and confirm at least one
+#      metric source per ticker.
+#
+# `profile` selects the metric set used by the LLM extractor and Validator
+# (see config/metrics.yaml). Banks: SBER, VTBR, BSPB, TCSG, MBNK, SVCB.
+#
+# An issuer with `MISSING` for type=4 (no IFRS at this id) is fine — the
+# pipeline gracefully falls through to RSBU and then to Issuer Report
+# (type=5) per the profile's `reporting_priority`.
+
+tickers:
+  - ticker: SBER
+    name: ПАО Сбербанк
+    e_disclosure_id: "3043"
+    profile: bank
+
+  - ticker: LKOH
+    name: ПАО "ЛУКОЙЛ"
+    e_disclosure_id: "17"
+    profile: non_bank

@@ -1,37 +1,313 @@
-# Issuers to scrape from e-disclosure.ru.
+# MOEX Top-50 issuers scraped from e-disclosure.ru.
 #
-# The default list below is a SEED with three placeholder entries (Sber, Gazprom,
-# Lukoil). The full Top-50 MOEX list must be filled in manually by the operator
-# during initial setup — replace `e_disclosure_id: REPLACE_ME` with the real
-# numeric identifier from the issuer's e-disclosure card URL.
+# Each entry needs:
+#   ticker            — MOEX ticker (uppercase Latin)
+#   name              — full legal name as it appears on e-disclosure
+#   e_disclosure_id   — numeric id from the issuer's e-disclosure card URL
+#                       (https://www.e-disclosure.ru/portal/company.aspx?id=N)
+#   profile           — bank | non_bank (drives the metric set used by the
+#                       Metric Extractor; see config/metrics.yaml)
+# Optional:
+#   inn / ogrn        — for downstream cross-references; not used for scraping
+#   priority_override — overrides the profile's reporting_priority for this
+#                       issuer (rare; useful when an issuer publishes IFRS
+#                       only via a sister entity)
 #
-# Required fields:
-#   ticker, e_disclosure_id, name
-# Optional fields:
-#   profile — bank | non_bank (default non_bank). Drives the metric set
-#             used for extraction (see config/metrics.yaml).
-#             Banks: SBER, VTBR, BSPB, TCSG (T-Technologies), MBNK, SVCB.
-#   inn / ogrn — for downstream cross-references; not required for scraping.
-#   priority_override — overrides metrics.reporting_priority for this issuer.
+# Workflow for filling new entries (Patch 20):
+#   1. Add the entry with `e_disclosure_id: REPLACE_ME`.
+#   2. Run `python tools/find_e_disclosure_ids.py --tickers <TICKER>` —
+#      it queries e-disclosure search and prints the top-3 candidate ids
+#      ranked by name similarity. Pick the right one by hand and paste
+#      it back here.
+#   3. Run `python tools/validate_tickers.py [--strict]` — probes
+#      type=2/3/4/5 per ticker and reports OK/EMPTY/MISSING/ERROR. A
+#      ticker passes when at least one of type=3/4/5 returns OK.
+#
+# Known caveats:
+#   - Some issuers publish only one or two of the four file types under
+#     their main e_disclosure_id (canonical example: LKOH id=17 has no
+#     type=4 — Lukoil's IFRS report is filed under another legal entity).
+#     Such MISSING types are reported by validate_tickers.py but do not
+#     fail validation; the Metric Extractor's profile.reporting_priority
+#     gracefully falls back to whatever IS published.
+#   - The MOEX index composition shifts over time. The list below is a
+#     snapshot — operators should refresh against
+#     https://www.moex.com/ru/index/IMOEX periodically.
+#
+# Banks in this list (profile: bank): SBER, VTBR, BSPB, TCSG, MBNK, SVCB.
 
 tickers:
+  # Banks --------------------------------------------------------------
   - ticker: SBER
-    e_disclosure_id: REPLACE_ME
     name: ПАО Сбербанк
+    e_disclosure_id: "3043"
     profile: bank
     inn: "7707083893"
     ogrn: "1027700132195"
 
-  - ticker: GAZP
+  - ticker: VTBR
+    name: Банк ВТБ (ПАО)
     e_disclosure_id: REPLACE_ME
-    name: ПАО Газпром
+    profile: bank
+
+  - ticker: BSPB
+    name: ПАО "Банк "Санкт-Петербург"
+    e_disclosure_id: REPLACE_ME
+    profile: bank
+
+  - ticker: TCSG
+    name: МКПАО "Т-Технологии"
+    e_disclosure_id: REPLACE_ME
+    profile: bank
+
+  - ticker: MBNK
+    name: ПАО "МТС-Банк"
+    e_disclosure_id: REPLACE_ME
+    profile: bank
+
+  - ticker: SVCB
+    name: ПАО "Совкомбанк"
+    e_disclosure_id: REPLACE_ME
+    profile: bank
+
+  # Oil & gas -----------------------------------------------------------
+  - ticker: GAZP
+    name: ПАО "Газпром"
+    e_disclosure_id: REPLACE_ME
     profile: non_bank
     inn: "7736050003"
     ogrn: "1027700070518"
 
-  - ticker: LKOH
+  - ticker: ROSN
+    name: ПАО "НК "Роснефть"
     e_disclosure_id: REPLACE_ME
-    name: ПАО ЛУКОЙЛ
+    profile: non_bank
+
+  - ticker: LKOH
+    name: ПАО "ЛУКОЙЛ"
+    e_disclosure_id: "17"
     profile: non_bank
     inn: "7708004767"
     ogrn: "1027700035769"
+
+  - ticker: NVTK
+    name: ПАО "НОВАТЭК"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: TATN
+    name: ПАО "Татнефть" имени В.Д. Шашина
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: SNGS
+    name: ПАО "Сургутнефтегаз"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: TRNFP
+    name: ПАО "Транснефть"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: BANEP
+    name: ПАО АНК "Башнефть"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  # Metals & mining ------------------------------------------------------
+  - ticker: GMKN
+    name: ПАО "ГМК "Норильский никель"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: NLMK
+    name: ПАО "Новолипецкий металлургический комбинат"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: MAGN
+    name: ПАО "Магнитогорский металлургический комбинат"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: CHMF
+    name: ПАО "Северсталь"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: ALRS
+    name: АК "АЛРОСА" (ПАО)
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: PLZL
+    name: ПАО "Полюс"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: RUAL
+    name: МКПАО "ОК РУСАЛ"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: PHOR
+    name: ПАО "ФосАгро"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  # Power & utilities ----------------------------------------------------
+  - ticker: IRAO
+    name: ПАО "Интер РАО ЕЭС"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: HYDR
+    name: ПАО "РусГидро"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: FEES
+    name: ПАО "Россети"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: UPRO
+    name: ПАО "Юнипро"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  # Telecom & IT ---------------------------------------------------------
+  - ticker: MTSS
+    name: ПАО "МТС"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: RTKM
+    name: ПАО "Ростелеком"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: YDEX
+    name: МКПАО "Яндекс"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: VKCO
+    name: МКПАО "ВК"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: POSI
+    name: ПАО "Группа Позитив"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: HEAD
+    name: МКПАО "Хэдхантер"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: OZON
+    name: МКПАО "Озон Холдинг"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: ASTR
+    name: ПАО "Группа Астра"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  # Retail & consumer ----------------------------------------------------
+  - ticker: MGNT
+    name: ПАО "Магнит"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: FIVE
+    name: ПАО "Корпоративный центр ИКС 5"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: LENT
+    name: ПАО "Лента"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: MVID
+    name: ПАО "М.видео"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: BELU
+    name: ПАО "НоваБев Групп"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: SBMX
+    name: ПАО "ГК "Самолёт"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: PIKK
+    name: ПАО "ПИК-специализированный застройщик"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: LSRG
+    name: ПАО "Группа ЛСР"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  # Transport & logistics ------------------------------------------------
+  - ticker: AFLT
+    name: ПАО "Аэрофлот - Российские авиалинии"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: NMTP
+    name: ПАО "Новороссийский морской торговый порт"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: FLOT
+    name: ПАО "Совкомфлот"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: GLTR
+    name: МКПАО "Global Trans"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  # Industrial / chem / agro --------------------------------------------
+  - ticker: NKNCP
+    name: ПАО "Нижнекамскнефтехим"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: AKRN
+    name: ПАО "Акрон"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: AGRO
+    name: ПАО "Группа Черкизово"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: SGZH
+    name: ПАО "Сегежа Групп"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  # Holding / market infra ----------------------------------------------
+  - ticker: AFKS
+    name: ПАО АФК "Система"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
+
+  - ticker: MOEX
+    name: ПАО "Московская Биржа ММВБ-РТС"
+    e_disclosure_id: REPLACE_ME
+    profile: non_bank
