@@ -228,6 +228,19 @@ class MetricExtractorService:
             pub.publication_id, is_incomplete
         )
 
+        # Patch 28: emit prompt-cache hit ratio so the operator can spot
+        # cache misses (TTL expiry, system-prompt churn) at a glance in
+        # ``pipeline.log``. ``cache_read`` ÷ ``input_tokens`` is the
+        # share of input billed at 0.1× and exempt from ITPM. Hit ratio
+        # of ~0 on call #2 of the same run signals a config regression
+        # (caching disabled, TTL too short, system prompt drifted).
+        cache_read = response.cache_read_input_tokens
+        cache_creation = response.cache_creation_input_tokens
+        cache_hit_ratio = (
+            round(cache_read / response.input_tokens, 3)
+            if response.input_tokens > 0
+            else 0.0
+        )
         self._log.info(
             "metric_extract_completed",
             publication_id=pub.publication_id,
@@ -241,6 +254,9 @@ class MetricExtractorService:
             is_incomplete=is_incomplete,
             input_tokens=response.input_tokens,
             output_tokens=response.output_tokens,
+            cache_read_input_tokens=cache_read,
+            cache_creation_input_tokens=cache_creation,
+            cache_hit_ratio=cache_hit_ratio,
         )
         return MetricExtractOutcome(
             publication_id=pub.publication_id,

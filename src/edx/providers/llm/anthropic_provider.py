@@ -50,6 +50,16 @@ class AnthropicLLMProvider:
         retry_min_wait_s: float = 0.5,
         retry_max_wait_s: float = 10.0,
         enable_prompt_caching: bool = True,
+        # Patch 28: bump the prompt-cache TTL from the 5-minute default
+        # to 1 hour. Two practical benefits:
+        # 1. A single ``edx run --full-reload`` can take 15–30 min on a
+        #    Top-50 ticker list; with 5-min TTL the cache evaporates
+        #    mid-run for slow tickers.
+        # 2. Daily cron jobs that fire every 24h still warm-start the
+        #    cache for the first ~1h of the next run if the operator
+        #    does a manual ``edx update`` shortly after the cron.
+        # Pass ``cache_ttl="5m"`` to revert to the original behaviour.
+        cache_ttl: str = "1h",
     ) -> None:
         self.client = client
         self.model = model
@@ -57,6 +67,7 @@ class AnthropicLLMProvider:
         self.retry_min_wait_s = retry_min_wait_s
         self.retry_max_wait_s = retry_max_wait_s
         self.enable_prompt_caching = enable_prompt_caching
+        self.cache_ttl = cache_ttl
         self._log = get_logger("edx.providers.llm.anthropic")
 
     @classmethod
@@ -70,6 +81,7 @@ class AnthropicLLMProvider:
         retry_min_wait_s: float = 0.5,
         retry_max_wait_s: float = 10.0,
         enable_prompt_caching: bool = True,
+        cache_ttl: str = "1h",
     ) -> AnthropicLLMProvider:
         client = anthropic.AsyncAnthropic(
             api_key=api_key,
@@ -83,6 +95,7 @@ class AnthropicLLMProvider:
             retry_min_wait_s=retry_min_wait_s,
             retry_max_wait_s=retry_max_wait_s,
             enable_prompt_caching=enable_prompt_caching,
+            cache_ttl=cache_ttl,
         )
 
     async def complete(self, req: LLMRequest) -> LLMResponse:
@@ -129,6 +142,21 @@ class AnthropicLLMProvider:
             usage = getattr(response, "usage", None)
             in_tokens = int(getattr(usage, "input_tokens", 0)) if usage else 0
             out_tokens = int(getattr(usage, "output_tokens", 0)) if usage else 0
+            # Patch 28: surface prompt-cache fields from the Anthropic
+            # usage response. ``cache_read_input_tokens`` is the slice
+            # served from cache (0.1× billed, doesn't count toward
+            # ITPM). ``cache_creation_input_tokens`` is the slice
+            # written *into* cache by this request (1.25× billed).
+            cache_read_tokens = (
+                int(getattr(usage, "cache_read_input_tokens", 0) or 0)
+                if usage
+                else 0
+            )
+            cache_creation_tokens = (
+                int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
+                if usage
+                else 0
+            )
 
             self._log.info(
                 "llm_request_completed",
@@ -136,6 +164,8 @@ class AnthropicLLMProvider:
                 model=self.model,
                 input_tokens=in_tokens,
                 output_tokens=out_tokens,
+                cache_read_input_tokens=cache_read_tokens,
+                cache_creation_input_tokens=cache_creation_tokens,
                 elapsed_s=round(elapsed, 4),
                 status="success",
             )
@@ -146,6 +176,8 @@ class AnthropicLLMProvider:
                 model=self.model,
                 input_tokens=in_tokens,
                 output_tokens=out_tokens,
+                cache_read_input_tokens=cache_read_tokens,
+                cache_creation_input_tokens=cache_creation_tokens,
             )
 
         retrier: AsyncRetrying = AsyncRetrying(
@@ -171,7 +203,14 @@ class AnthropicLLMProvider:
     def _build_system_blocks(self, text: str) -> list[dict[str, Any]]:
         block: dict[str, Any] = {"type": "text", "text": text}
         if self.enable_prompt_caching:
-            block["cache_control"] = {"type": "ephemeral"}
+            cache_control: dict[str, Any] = {"type": "ephemeral"}
+            # The Anthropic API treats absent ``ttl`` as "5m". Only set
+            # the field for the 1h variant — that keeps generated request
+            # bodies identical to the pre-Patch-28 wire format whenever
+            # the operator hasn't opted into the longer TTL.
+            if self.cache_ttl and self.cache_ttl != "5m":
+                cache_control["ttl"] = self.cache_ttl
+            block["cache_control"] = cache_control
         return [block]
 
     def _build_user_content(self, req: LLMRequest) -> list[dict[str, Any]]:

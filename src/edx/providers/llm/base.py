@@ -33,6 +33,15 @@ class LLMResponse(BaseModel):
     model: str
     input_tokens: int = 0
     output_tokens: int = 0
+    # Patch 28: prompt-caching observability. ``cache_read_input_tokens``
+    # are tokens served from cache (billed at 0.1× and not counted toward
+    # the org's ITPM rate limit). ``cache_creation_input_tokens`` are the
+    # tokens written *into* cache by this request (billed at 1.25×;
+    # subsequent calls within the TTL pay 0.1×). Sum of all four
+    # ``*_input_tokens`` ≤ true input tokens for the request — they're
+    # disjoint buckets.
+    cache_read_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
 
 
 class LLMUnavailableError(RuntimeError):

@@ -48,6 +48,7 @@ def build_llm_provider(settings: AppSettings) -> LLMProvider:
                 retry_min_wait_s=cfg.retry_min_wait_s,
                 retry_max_wait_s=cfg.retry_max_wait_s,
                 enable_prompt_caching=cfg.primary.enable_prompt_caching,
+                cache_ttl=cfg.primary.cache_ttl,
             )
         )
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -13,6 +15,11 @@ class AnthropicProviderConfig(BaseModel):
     base_url: str | None = None
     enable_pdf_input: bool = True
     enable_prompt_caching: bool = True
+    # Patch 28: Anthropic supports two ephemeral cache TTLs — 5 minutes
+    # (the historical default) and 1 hour. The 1h variant carries a
+    # higher write multiplier (2× vs 1.25×) but stays warm across full
+    # ``edx run`` invocations and adjacent cron-driven updates.
+    cache_ttl: Literal["5m", "1h"] = "1h"
 
 
 class OpenRouterProviderConfig(BaseModel):
