@@ -12,7 +12,13 @@ from edx.stages.text_extractor.ocr.yandex_vision import YandexVisionOCRProvider
 def build_ocr_provider(ocr_config: OCRConfig) -> OCRProvider:
     engine = ocr_config.engine
     if engine == "tesseract":
-        return TesseractOCRProvider(dpi=ocr_config.tesseract_dpi)
+        return TesseractOCRProvider(
+            dpi=ocr_config.tesseract_dpi,
+            psm=ocr_config.tesseract_psm,
+            retry_psm=ocr_config.tesseract_retry_psm,
+            retry_min_chars=ocr_config.tesseract_retry_min_chars,
+            retry_min_digit_ratio=ocr_config.tesseract_retry_min_digit_ratio,
+        )
     if engine == "yandex_vision":
         return YandexVisionOCRProvider(
             folder_id=ocr_config.yandex_vision.folder_id,

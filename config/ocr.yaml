@@ -8,7 +8,24 @@ engine: tesseract
 tesseract_langs:
   - rus
   - eng
-tesseract_dpi: 300
+
+# Tesseract DPI: на банковских РСБУ-формах 300 даёт путаницу 8↔3
+# на правых колонках; 400 заметно надёжнее ценой ~+50% CPU/page (Patch 31).
+tesseract_dpi: 400
+
+# Tesseract PSM (page segmentation mode):
+# 3 = auto (default Tesseract; плохо на табличных формах);
+# 6 = single uniform block of text (рекомендуется для РСБУ-форм);
+# 4 = single column of variable-sized text (хорошо для cover-страниц).
+tesseract_psm: 6
+
+# Patch 31: per-page retry. Если первый проход вернул < min_chars
+# символов или digit-ratio < min_digit_ratio (typical на cover-страницах
+# и пустых annexes, где PSM 6 over-сегментирует), повторить с retry_psm
+# и оставить лучший результат. null отключает retry.
+tesseract_retry_psm: 4
+tesseract_retry_min_chars: 80
+tesseract_retry_min_digit_ratio: 0.05
 
 yandex_vision:
   folder_id: null

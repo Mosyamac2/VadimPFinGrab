@@ -212,7 +212,10 @@ def test_ocr_config_defaults() -> None:
     cfg = OCRConfig()
     assert cfg.engine == "tesseract"
     assert cfg.tesseract_langs == ["rus", "eng"]
-    assert cfg.tesseract_dpi == 300
+    # Patch 31: bumped from 300 → 400 (Russian RSBU forms with thin grid).
+    assert cfg.tesseract_dpi == 400
+    assert cfg.tesseract_psm == 6
+    assert cfg.tesseract_retry_psm == 4
 
 
 def test_ocr_config_invalid_engine() -> None:

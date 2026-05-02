@@ -369,7 +369,7 @@ sudo systemctl status edx-update.timer
 | `config/event_types.yaml` | Новые типы событий | Запись с `code: other` (обязательна) |
 | `config/app.yaml` | `schedule.cron_time`, `google_drive.*`, `validator.completeness_threshold`, `discoverer.requests_per_second` | Все `paths:` |
 | `config/llm.yaml` | `cache_enabled`, `concurrency`, `max_retries`, `primary.cache_ttl` (`5m` \| `1h`) | `model` без причины |
-| `config/ocr.yaml` | `tesseract_dpi` (300/400/600) | `engine` — пока поддерживается только `tesseract` |
+| `config/ocr.yaml` | `tesseract_dpi` (400/600), `tesseract_psm` (6/4/3), `tesseract_retry_psm` (4 / null) | `engine` — пока поддерживается только `tesseract` |
 
 ### Что значат основные параметры
 
