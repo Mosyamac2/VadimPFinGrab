@@ -43,6 +43,15 @@ discoverer:
   # cookies:
   #   spsn: "1777660057657_"
   #   spid: "1777660057657_bcd3ce8ab3fb4d44f95d6b20e4184f4e_4u1a2wa0rpuqir7k"
+  # HTTP backend for the Discoverer + Downloader stages (Patch 23).
+  #   httpx       — stdlib TLS, fast, fails when ServicePipe checks JA3.
+  #   playwright  — launches headless Chromium once per run; reuses
+  #                 Chromium's TLS-fingerprint and cookie jar so JA3
+  #                 stays consistent. Requires:
+  #                     pip install '.[playwright]'
+  #                     playwright install chromium
+  #                     playwright install-deps chromium    # Linux only
+  http_backend: httpx
 
 downloader:
   # Number of publications downloaded in parallel.

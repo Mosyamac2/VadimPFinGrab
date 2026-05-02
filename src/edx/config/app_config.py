@@ -63,8 +63,19 @@ class DiscovererConfig(BaseModel):
     # JavaScript anti-bot challenge (ServicePipe, Cloudflare, etc.): solve
     # the challenge once in a real browser, copy values from
     # devtools (Application → Cookies), paste here. Cookies expire and need
-    # manual refresh; for a permanent fix use a headless-browser scraper.
+    # manual refresh; for a permanent fix use ``http_backend: playwright``
+    # below — it launches a real Chromium that solves the challenge in-page
+    # and reuses Chromium's TLS-fingerprint for every subsequent request.
     cookies: dict[str, str] = Field(default_factory=dict)
+    # Patch 23: HTTP backend for the Discoverer + Downloader stages.
+    # ``httpx`` (default) — stdlib TLS, fast, fails when ServicePipe
+    # validates the JA3 fingerprint (the cookie/UA workaround above
+    # eventually stops working on most live sites).
+    # ``playwright`` — launches headless Chromium once per run, runs the
+    # JS-challenge in-browser, and routes all requests through Chromium's
+    # network stack so JA3 matches the cookies. Requires
+    # ``pip install playwright && playwright install chromium``.
+    http_backend: Literal["httpx", "playwright"] = "httpx"
 
 
 class DownloaderConfig(BaseModel):

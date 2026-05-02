@@ -51,6 +51,12 @@ dev = [
     "mypy>=1.10",
     "types-PyYAML>=6.0",
 ]
+# Patch 23 — Playwright-based HTTP backend that talks to e-disclosure
+# through real Chromium (bypasses ServicePipe JA3 fingerprinting).
+# Install with: ``pip install '.[playwright]' && playwright install chromium``.
+playwright = [
+    "playwright>=1.50",
+]
 
 [project.scripts]
 edx = "edx.cli:main"

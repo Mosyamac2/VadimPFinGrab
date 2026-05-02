@@ -5,7 +5,7 @@ from __future__ import annotations
 import httpx
 
 from edx.config import AppSettings
-from edx.http.client import EDisclosureClient, build_user_agent
+from edx.http import EDisclosureClient, build_http_client
 from edx.stages.discoverer.service import DiscovererService
 from edx.storage import PublicationsRepo
 
@@ -15,19 +15,9 @@ def build_edisclosure_client(
     *,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> EDisclosureClient:
-    cfg = settings.app.discoverer
-    return EDisclosureClient(
-        base_url=cfg.base_url,
-        user_agent=build_user_agent(settings),
-        requests_per_second=cfg.requests_per_second,
-        request_timeout_s=cfg.request_timeout_s,
-        max_retries=cfg.max_retries,
-        retry_min_wait_s=cfg.retry_min_wait_s,
-        retry_max_wait_s=cfg.retry_max_wait_s,
-        respect_robots=cfg.respect_robots,
-        transport=transport,
-        cookies=cfg.cookies or None,
-    )
+    """Patch 23: thin alias kept for back-compat. Dispatches to the
+    configured backend via :func:`edx.http.build_http_client`."""
+    return build_http_client(settings, transport=transport)
 
 
 def build_discoverer_service(

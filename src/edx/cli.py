@@ -21,7 +21,7 @@ import yaml
 
 from edx import __version__
 from edx.config import AppSettings, ConfigLoadError, load_all
-from edx.http.client import EDisclosureClient, build_user_agent
+from edx.http import build_http_client
 from edx.logging_setup import configure, get_logger
 from edx.orchestrator import Orchestrator, StageBundle
 from edx.providers.llm import LLMUnavailableError, build_llm_provider
@@ -321,19 +321,7 @@ def _execute_pipeline_run(
         tickers_repo.upsert_from_config(settings.tickers.tickers)
 
         async def _run_pipeline() -> int:
-            from edx.http.client import EDisclosureClient, build_user_agent
-
-            async with EDisclosureClient(
-                base_url=settings.app.discoverer.base_url,
-                user_agent=build_user_agent(settings),
-                requests_per_second=settings.app.discoverer.requests_per_second,
-                request_timeout_s=settings.app.discoverer.request_timeout_s,
-                max_retries=settings.app.discoverer.max_retries,
-                retry_min_wait_s=settings.app.discoverer.retry_min_wait_s,
-                retry_max_wait_s=settings.app.discoverer.retry_max_wait_s,
-                respect_robots=settings.app.discoverer.respect_robots,
-                cookies=settings.app.discoverer.cookies or None,
-            ) as http_client:
+            async with build_http_client(settings) as http_client:
                 from edx.stages.discoverer import build_discoverer_service
 
                 discoverer, _ = build_discoverer_service(
@@ -550,17 +538,7 @@ def _cmd_download(args: argparse.Namespace) -> int:
             return EXIT_OK
 
         async def _run() -> int:
-            async with EDisclosureClient(
-                base_url=settings.app.discoverer.base_url,
-                user_agent=build_user_agent(settings),
-                requests_per_second=settings.app.discoverer.requests_per_second,
-                request_timeout_s=settings.app.discoverer.request_timeout_s,
-                max_retries=settings.app.discoverer.max_retries,
-                retry_min_wait_s=settings.app.discoverer.retry_min_wait_s,
-                retry_max_wait_s=settings.app.discoverer.retry_max_wait_s,
-                respect_robots=settings.app.discoverer.respect_robots,
-                cookies=settings.app.discoverer.cookies or None,
-            ) as client:
+            async with build_http_client(settings) as client:
                 service = build_downloader_service(
                     settings, publications_repo, client=client
                 )

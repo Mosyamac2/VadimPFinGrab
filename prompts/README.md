@@ -44,10 +44,11 @@
 | 20 | [Top-50 tickers.yaml](prompt_20_top50_tickers.md) | scaffold `config/tickers.yaml` (51 эмитент, SBER+LKOH с реальными id); CLI `tools/find_e_disclosure_ids.py` (поиск id) и `tools/validate_tickers.py` (probe `OK/EMPTY/MISSING/ERROR` per type); `config/tickers.yaml.template` | нет |
 | 21 | [Issuer Report как 3-й источник](prompt_21_issuer_report_source.md) | миграция `0009_issuer_reporting_standard.sql` (CHECK widening); `text_extractor/issuer_trim.py` (regex с alternation для трёх формулировок 1.4 + TOC-эвристика); 3-tier приоритет [IFRS, RSBU, ISSUER] в Metric Extractor; ISSUER-источник не отправляется как PDF, текст обрезается до 1.4; удалён ISSUER→RSBU shim из Patch 19 | нет |
 | 22 | [Документация и косметика](prompt_22_cosmetic_docs.md) | README/USER_GUIDE под профили + sources tickers.yaml workflow; `app.yaml` с `min_text_chars_per_page` + `issuer_trim_max_chars`; `metrics.yaml.template`; `unrar` → опциональный | нет |
+| 23 | [Playwright HTTP-бэкенд (ServicePipe / JA3)](prompt_23_playwright_backend.md) | `PlaywrightEDisclosureClient` (наследник `EDisclosureClient`); `app.discoverer.http_backend: httpx \| playwright`; опциональная зависимость `pip install '.[playwright]'`; обходит JA3-fingerprint ServicePipe на live-сайте | нет (дефолт `httpx`) |
 
-**Фактический порядок исполнения** (с метками коммитов): `17 + 16` (один коммит — миграция нужна до парсера) → `18` → `19` → `20` → `21` → `22`. Patch 20 пришёлся между поведенческими патчами, потому что инструменты валидации потребовались для проверки Discoverer на боевой выборке.
+**Фактический порядок исполнения** (с метками коммитов): `17 + 16` (один коммит — миграция нужна до парсера) → `18` → `19` → `20` → `21` → `22` → `23`. Patch 23 добавлен после `22` потому, что только на боевом запуске стало видно: ServicePipe валидирует JA3-fingerprint, и cookies-обходный путь нестабилен — для cron-прогона нужен Playwright.
 
-**Зависимости от внешнего сайта:** Patch 16 предполагает, что у пайплайна уже есть рабочий обход анти-бота ServicePipe (UA + cookies или headless-Chromium). Если на момент исполнения Patch 16 анти-бот всё ещё блокирует прямой `httpx`, фикстуры остаются единственным способом проверить парсер; интеграционная проверка откладывается.
+**Зависимости от внешнего сайта:** к Patch 23 эта строка уже не актуальна — Playwright-бэкенд штатно обходит ServicePipe-challenge. Для тестов всё равно используются фикстуры (network-free, быстрые); live-проверка Playwright-пути остаётся ручной (см. DoD в `prompt_23`).
 
 ## Соглашения
 
