@@ -48,6 +48,35 @@
 
 **Фактический порядок исполнения** (с метками коммитов): `17 + 16` (один коммит — миграция нужна до парсера) → `18` → `19` → `20` → `21` → `22` → `23`. Patch 23 добавлен после `22` потому, что только на боевом запуске стало видно: ServicePipe валидирует JA3-fingerprint, и cookies-обходный путь нестабилен — для cron-прогона нужен Playwright.
 
+## Серия Patch 24–28 (production-hardening после live-прогона) — ✅ закрыта без отдельных промптов
+
+После Patch 23 на боевом VPS вылезли мелкие, но дорогостоящие баги в стадиях ниже Discoverer/Downloader; они правились ad-hoc без отдельных prompt-файлов. Полный реестр — в [`README.md` § «v3 — production-hardening»](../README.md#v3--production-hardening-после-live-прогонов-patch-2328--завершено) и в логе коммитов.
+
+| # | Что приземлилось | Breaking? |
+|---|---|---|
+| 24 | HTTPS-прокси для Anthropic + Google Drive (`httplib2.proxy_info_from_environment`); `NO_PROXY=e-disclosure.ru` оставляет портал в обход прокси | нет |
+| 25 | Classifier: deterministic `type_code → reporting_standard` маппинг даже для scan-only PDF (раньше попадали в `OTHER` и игнорировались Metric Extractor'ом) | нет |
+| 26 | Metric Extractor: dedup по `(date, period_type, std, metric_name)` — LLM иногда отдаёт две `extractions`-записи за один период | нет |
+| 27 | Drop comparative-period rows (фильтр на `period.period_type == pub.reporting_period_type`) + `INSERT OR REPLACE` в `metrics_repo` для cross-publication коллизий | нет |
+| 28 | Anthropic prompt-caching observability (`cache_read_input_tokens`/`cache_creation_input_tokens` + `cache_hit_ratio`); `llm.primary.cache_ttl: 1h` default — кэш не испаряется в середине `edx run --full-reload` | нет |
+
+## Серия Patch 29–34 (улучшение coverage на сканированных формах) — 🟡 in flight
+
+После live-прогона `run_id=13` (38 written / 2 incomplete / 6 skipped) обнаружилось, что Anthropic native-PDF-input не вытягивает цифры из русских РСБУ-форм с тонкой grid-таблицей и подписью главбуха — независимо от того, гибридный документ или чисто текстовый. Пострадало минимум 6 публикаций в одном прогоне (CHMF FY 2025 / VTBR Q1 2026 / SBER 9M+12M 2025 / VTBR FY 2025 / VTBR IFRS H1 2025). Корневой анализ — в `PIPELINE_LOGIC.md` §5 + history-блоке за 2026-05-02.
+
+Серия Patch 29–34 разбивает решение на дискретные задачи с чётким приоритетом. Patches 29 + 30 + 32 — обязательная база (P0); 31 — улучшение Tesseract (P1); 33 + 34 — opt-in fallback'ы под флагом, реализуются только если P0–P1 не закрыли всё.
+
+| # | Промпт | Что приземлится | Pri | Breaking? |
+|---|---|---|---|---|
+| 29 | [Hybrid-PDF и RSBU через text-path](prompt_29_hybrid_pdf_text_path.md) | `MetricExtractorService.send_pdf` дополняется `scan_ratio_threshold` + `pdf_input_standards`; RSBU и hybrid-документы шлются как text, не PDF | P0 | нет (default IFRS остаётся PDF-путь) |
+| 30 | [Якорь начала балансовой формы](prompt_30_balance_anchor_trim.md) | `text_extractor/balance_anchor.py` с `extract_balance_sheet_onwards`; для RSBU обрезается аудиторское заключение до якоря «БУХГАЛТЕРСКИЙ БАЛАНС» / «Форма по ОКУД 0710001» | P0 | нет (при отсутствии якоря fail-soft на полный текст) |
+| 31 | [Tesseract DPI 400 + PSM 6 + retry](prompt_31_tesseract_quality.md) | default DPI 300→400, PSM 3→6, per-page retry с PSM 4 при низком digit-ratio | P1 | нет (knobs, дефолты улучшаются) |
+| 32 | [Discoverer: парсинг reporting_period](prompt_32_period_parser_extensions.md) | новые regex-паттерны (короткое «за 2025 год», «1 квартал 2026 года» с пробелами, fallback на `<a title>`) → Patch 27 (drop comparative) корректно срабатывает на FY-RSBU | P1 | нет (аддитивные паттерны) |
+| 33 | [Vision-fallback при низком coverage](prompt_33_vision_fallback.md) | `LLMRequest.pdf_page_indices`; ретрай через Anthropic vision только на scan-страницах при `coverage_ratio < threshold`; opt-in через `vision_fallback_enabled: false` | P2 | нет (default off) |
+| 34 | [Full vision path opt-in per-ticker](prompt_34_full_vision_per_ticker.md) | `tickers.yaml.use_vision_extraction: true` + `LLMRequest.pdf_page_images`; image-content-blocks вместо PDF; глобальный kill switch | P3 | нет (opt-in per-ticker) |
+
+**Зависимости внутри серии:** Patch 30/31/32 — независимы, можно параллельно. Patch 29 — обязательная предпосылка для Patch 30/33/34 (без неё RSBU вообще не доходит до text-path). Patch 33 — должен идти после 30+31, иначе будет fallback'иться даже на дешёвых случаях. Patch 34 — после 33; рассматривается только если оставшиеся проблемные эмитенты после P0–P2 ≥ 1.
+
 **Зависимости от внешнего сайта:** к Patch 23 эта строка уже не актуальна — Playwright-бэкенд штатно обходит ServicePipe-challenge. Для тестов всё равно используются фикстуры (network-free, быстрые); live-проверка Playwright-пути остаётся ручной (см. DoD в `prompt_23`).
 
 ## Соглашения
