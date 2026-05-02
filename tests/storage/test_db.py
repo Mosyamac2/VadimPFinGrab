@@ -20,8 +20,13 @@ def test_migrate_creates_all_tables(tmp_path: Path) -> None:
     db = Database(tmp_path / "state.sqlite")
     applied = db.migrate()
     assert "0001_init" in applied
+    assert "0007_publications_period" in applied
     with closing(db.connect()) as conn:
         names = _table_names(conn)
+        publications_cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(publications)")
+        }
     assert {
         "tickers",
         "publications",
@@ -31,6 +36,13 @@ def test_migrate_creates_all_tables(tmp_path: Path) -> None:
         "runs",
         "schema_migrations",
     }.issubset(names)
+    # Patch 17 columns must exist on publications after migrate().
+    assert {
+        "report_type_code",
+        "report_type_label",
+        "reporting_period_year",
+        "reporting_period_type",
+    }.issubset(publications_cols)
 
 
 def test_migrate_idempotent(tmp_path: Path) -> None:

@@ -66,6 +66,13 @@ class PublicationRow:
     discovered_at: str
     updated_at: str
     is_incomplete: int = 0
+    # Patch 17: report type / period taken deterministically from the listing
+    # URL and the "Отчётный период" column. ``None`` for legacy rows and for
+    # ``publication_type='event'``.
+    report_type_code: int | None = None
+    report_type_label: str | None = None
+    reporting_period_year: int | None = None
+    reporting_period_type: PeriodType | None = None
 
 
 @dataclass(frozen=True)

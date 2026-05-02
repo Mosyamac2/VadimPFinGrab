@@ -1,16 +1,23 @@
-"""Pure parser tests against fixed HTML fixtures."""
+"""``parse_listing_page`` against real Firefox view-source snapshots.
+
+Patch 16 multi-issuer principle: every behavioral assertion on the parser
+runs against fixtures from at least two different issuers (SBER + LKOH) so
+the parser cannot accidentally encode a single issuer's quirks.
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from edx.stages.discoverer.parser import (
     DiscoveredPublication,
-    make_publication_id,
-    parse_issuer_card,
+    parse_listing_page,
+    reporting_standard_for_type,
 )
 
-FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "edisclosure"
+FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "edisclosure_real"
 BASE_URL = "https://www.e-disclosure.ru"
 
 
@@ -18,86 +25,186 @@ def _load(name: str) -> str:
     return (FIXTURES / name).read_text(encoding="utf-8")
 
 
-def test_parser_extracts_reports_and_events_from_full_card() -> None:
-    result = parse_issuer_card(
-        _load("issuer_full.html"), base_url=BASE_URL, ticker="SBER"
+# --- SBER (banking, all four observed types) -------------------------------
+
+
+def test_parser_sber_type4_msfo_full_table() -> None:
+    result = parse_listing_page(
+        _load("sber_type_4.html"),
+        base_url=BASE_URL,
+        ticker="SBER",
+        type_code=4,
     )
     assert result.warnings == []
-    by_url = {p.source_url: p for p in result.publications}
-    expected_urls = {
-        f"{BASE_URL}/portal/files/12345/q4-2025-ifrs.pdf",
-        f"{BASE_URL}/portal/files/12345/q3-2025-ifrs.pdf",
-        f"{BASE_URL}/portal/files/12345/q2-2025-rsbu.pdf",
-        f"{BASE_URL}/portal/messages/abc-001.html",
-        f"{BASE_URL}/portal/messages/abc-002.html",
-    }
-    assert set(by_url) == expected_urls
-
-    annual = by_url[f"{BASE_URL}/portal/files/12345/q4-2025-ifrs.pdf"]
-    assert annual.publication_type == "report"
-    assert annual.publication_date == "2026-03-15"
-    assert annual.title == "МСФО за 2025 год (годовая)"
-
-    div = by_url[f"{BASE_URL}/portal/messages/abc-001.html"]
-    assert div.publication_type == "event"
-    assert div.publication_date == "2026-04-05"
-    assert div.title.startswith("Решение о выплате")
+    assert len(result.publications) == 7
+    # All rows must carry the deterministic Patch 17 fields.
+    for pub in result.publications:
+        assert pub.report_type_code == 4
+        assert pub.report_type_label is not None
+        assert pub.reporting_period_year is not None
+        assert pub.reporting_period_type is not None
+        assert pub.publication_id.startswith("SBER-4-")
+        assert pub.source_url.endswith("FileLoad.ashx?Fileid=" + pub.publication_id.split("-")[-1])
+    # Period-type variety: at least Q1, H1, 9M, FY all present.
+    period_types = {pub.reporting_period_type for pub in result.publications}
+    assert {"Q1", "9M", "FY"}.issubset(period_types)
+    # Latest fileid 1924258 (Q1 2026) was at the top of the listing.
+    head = result.publications[0]
+    assert head.publication_id == "SBER-4-1924258"
+    assert head.reporting_period_year == 2026
+    assert head.reporting_period_type == "Q1"
 
 
-def test_parser_handles_iso_date_format() -> None:
-    result = parse_issuer_card(
-        _load("issuer_reports_only.html"), base_url=BASE_URL, ticker="GAZP"
+def test_parser_sber_type3_rsbu() -> None:
+    result = parse_listing_page(
+        _load("sber_type_3.html"),
+        base_url=BASE_URL,
+        ticker="SBER",
+        type_code=3,
     )
     assert result.warnings == []
-    assert len(result.publications) == 1
-    pub = result.publications[0]
-    assert pub.publication_date == "2026-04-15"
-    assert pub.publication_type == "report"
+    assert len(result.publications) == 13
+    for pub in result.publications:
+        assert pub.report_type_code == 3
+        assert pub.publication_id.startswith("SBER-3-")
 
 
-def test_parser_empty_card_warns() -> None:
-    result = parse_issuer_card(
-        _load("issuer_empty.html"), base_url=BASE_URL, ticker="LKOH"
+def test_parser_sber_type2_annual_report_all_fy() -> None:
+    """type=2 has an extra "approval date" cell — must not break date pick."""
+    result = parse_listing_page(
+        _load("sber_type_2.html"),
+        base_url=BASE_URL,
+        ticker="SBER",
+        type_code=2,
+    )
+    assert result.warnings == []
+    assert len(result.publications) == 4
+    assert all(pub.reporting_period_type == "FY" for pub in result.publications)
+    # Publication date is "Дата размещения" (the third date column on type=2),
+    # not "Дата основания" or the extra approval date.
+    head = result.publications[0]
+    assert head.publication_date == "2025-07-01"
+
+
+# --- LKOH (oil & gas, deep history) — multi-issuer guarantee ---------------
+
+
+def test_parser_lkoh_type3_rsbu_deep_history() -> None:
+    """LKOH РСБУ has 60 rows from 2009 to 2026 — stress-tests the period parser
+    across a 17-year span and four period forms on a non-banking issuer.
+    """
+    result = parse_listing_page(
+        _load("lkoh_type_3.html"),
+        base_url=BASE_URL,
+        ticker="LKOH",
+        type_code=3,
+    )
+    assert result.warnings == []
+    assert len(result.publications) == 60
+    years = {pub.reporting_period_year for pub in result.publications}
+    assert min(years) <= 2010 and max(years) >= 2026
+    period_types = {pub.reporting_period_type for pub in result.publications}
+    assert {"Q1", "H1", "9M", "FY"}.issubset(period_types)
+    # The very first row is Q1 2026, the very last is the oldest annual.
+    head = result.publications[0]
+    assert (head.reporting_period_year, head.reporting_period_type) == (2026, "Q1")
+    tail = result.publications[-1]
+    assert tail.reporting_period_type == "FY"
+    assert tail.reporting_period_year is not None and tail.reporting_period_year <= 2010
+
+
+# --- soft-error handling ---------------------------------------------------
+
+
+def test_parser_returns_empty_when_table_missing() -> None:
+    """200 OK with no ``table.files-table`` → empty result, no warnings.
+
+    This is the LKOH ``type=4`` case (issuer doesn't publish IFRS at this id).
+    """
+    html = "<html><body><div>No reports here.</div></body></html>"
+    result = parse_listing_page(
+        html, base_url=BASE_URL, ticker="LKOH", type_code=4
     )
     assert result.publications == []
-    assert any("publications-section" in w for w in result.warnings)
+    assert result.warnings == []
 
 
-def test_parser_empty_html_string_warns() -> None:
-    result = parse_issuer_card("", base_url=BASE_URL, ticker="X")
+def test_parser_warns_on_empty_html() -> None:
+    result = parse_listing_page(
+        "", base_url=BASE_URL, ticker="X", type_code=4
+    )
     assert result.publications == []
     assert "empty html" in result.warnings
 
 
-def test_parser_drops_malformed_rows_with_warnings() -> None:
-    result = parse_issuer_card(
-        _load("issuer_with_bad_rows.html"), base_url=BASE_URL, ticker="ROSN"
+def test_parser_skips_row_without_file_link_with_warning() -> None:
+    html = (
+        "<html><body><table class='files-table'><tbody>"
+        "<tr><th>№</th><th>Тип</th><th>П</th><th>Д1</th><th>Д2</th><th>Файл</th><th></th></tr>"
+        "<tr>"
+        "<td class='row-number-cell'>1</td>"
+        "<td class='type-cell'>Что-то</td>"
+        "<td>2025</td>"
+        "<td class='date-cell'>01.01.2025</td>"
+        "<td class='date-cell'>02.01.2025</td>"
+        "<td class='file-cell'>(no link)</td>"
+        "<td class='cert-cell'></td>"
+        "</tr></tbody></table></body></html>"
     )
-    # Only one row is well-formed enough to make it through.
+    result = parse_listing_page(
+        html, base_url=BASE_URL, ticker="X", type_code=3
+    )
+    assert result.publications == []
+    assert any("file link" in w for w in result.warnings)
+
+
+def test_parser_warns_on_unrecognised_period() -> None:
+    html = (
+        "<html><body><table class='files-table'><tbody>"
+        "<tr><th>№</th><th>Т</th><th>П</th><th>Д1</th><th>Д2</th><th>Ф</th><th></th></tr>"
+        "<tr>"
+        "<td class='row-number-cell'>1</td>"
+        "<td class='type-cell'>Что-то</td>"
+        "<td>какой-то период</td>"
+        "<td class='date-cell'>01.01.2025</td>"
+        "<td class='date-cell'>02.01.2025</td>"
+        "<td class='file-cell'><a class='file-link' href='https://x' data-fileid='999'>zip</a></td>"
+        "<td class='cert-cell'></td>"
+        "</tr></tbody></table></body></html>"
+    )
+    result = parse_listing_page(
+        html, base_url=BASE_URL, ticker="X", type_code=3
+    )
+    # Row is still emitted (date and link are valid), but with a warning
+    # and no period info.
     assert len(result.publications) == 1
-    assert result.publications[0].source_url.endswith("/portal/messages/ok.html")
-    assert result.publications[0].publication_date == "2026-02-02"
-    # The other three rows produce warnings.
-    assert len(result.warnings) >= 3
-    joined = " | ".join(result.warnings)
-    assert "without date" in joined
-    assert "unparseable date" in joined
-    assert "empty href" in joined
-
-
-def test_publication_id_is_deterministic() -> None:
-    pid1 = make_publication_id("https://example/a.pdf", "2026-01-01", "SBER")
-    pid2 = make_publication_id("https://example/a.pdf", "2026-01-01", "SBER")
-    assert pid1 == pid2
-    assert pid1.startswith("SBER-2026-01-01-")
-    pid_other = make_publication_id(
-        "https://example/b.pdf", "2026-01-01", "SBER"
-    )
-    assert pid_other != pid1
+    assert result.publications[0].reporting_period_year is None
+    assert result.publications[0].reporting_period_type is None
+    assert any("unrecognised reporting period" in w for w in result.warnings)
 
 
 def test_parser_returns_publication_objects() -> None:
-    result = parse_issuer_card(
-        _load("issuer_reports_only.html"), base_url=BASE_URL, ticker="GAZP"
+    result = parse_listing_page(
+        _load("sber_type_4.html"),
+        base_url=BASE_URL,
+        ticker="SBER",
+        type_code=4,
     )
-    assert all(isinstance(p, DiscoveredPublication) for p in result.publications)
+    assert all(
+        isinstance(pub, DiscoveredPublication) for pub in result.publications
+    )
+
+
+@pytest.mark.parametrize(
+    "type_code, expected",
+    [
+        (2, "ANNUAL"),
+        (3, "RSBU"),
+        (4, "IFRS"),
+        (5, "ISSUER"),
+        (1, None),  # type=1 (statutory) is not a metric source
+        (99, None),
+    ],
+)
+def test_reporting_standard_mapping(type_code: int, expected: str | None) -> None:
+    assert reporting_standard_for_type(type_code) == expected

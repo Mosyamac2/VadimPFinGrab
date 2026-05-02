@@ -1,4 +1,4 @@
-"""DiscovererService: incremental filtering, repo writes."""
+"""DiscovererService: 4-URL crawl, fail-soft, new fields propagation."""
 
 from __future__ import annotations
 
@@ -11,37 +11,79 @@ import pytest
 
 from edx.config import TickerEntry
 from edx.http.client import EDisclosureClient
-from edx.stages.discoverer.service import DiscovererService
+from edx.stages.discoverer.service import (
+    REPORT_TYPE_CODES,
+    DiscovererService,
+)
 from edx.storage import Database, PublicationsRepo, TickersRepo
 
-FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "edisclosure"
+FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "edisclosure_real"
 
 
-def _full_card_transport(html: str) -> httpx.MockTransport:
+def _per_type_transport(
+    pages: dict[int, tuple[int, str]],
+) -> tuple[httpx.MockTransport, list[tuple[str, str]]]:
+    """Mock transport keyed by ``type=`` query param.
+
+    ``pages[type_code] = (status, html)``. Missing types return 404.
+    Tracks every request (path + raw query) so tests can assert iteration.
+    """
+    seen: list[tuple[str, str]] = []
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/robots.txt":
             return httpx.Response(200, text="")
-        return httpx.Response(200, text=html)
+        seen.append((request.url.path, request.url.query.decode("ascii")))
+        if request.url.path != "/portal/files.aspx":
+            return httpx.Response(404, text="not found")
+        type_str = request.url.params.get("type", "")
+        try:
+            type_code = int(type_str)
+        except ValueError:
+            return httpx.Response(404, text="bad type")
+        if type_code not in pages:
+            return httpx.Response(404, text="missing type")
+        status, html = pages[type_code]
+        return httpx.Response(
+            status, text=html, headers={"Content-Type": "text/html"}
+        )
 
-    return httpx.MockTransport(handler)
+    return httpx.MockTransport(handler), seen
 
 
 def _make_db_with_ticker(
-    tmp_path: Path, ticker: str
+    tmp_path: Path, ticker: str, e_disclosure_id: str = "3043"
 ) -> tuple[Database, sqlite3.Connection]:
     db = Database(tmp_path / "state.sqlite")
     db.migrate()
     conn = db.connect()
     TickersRepo(db, conn).upsert_from_config(
-        [TickerEntry(ticker=ticker, e_disclosure_id="42", name=ticker)]
+        [TickerEntry(ticker=ticker, e_disclosure_id=e_disclosure_id, name=ticker)]
     )
     return db, conn
 
 
+def _load(name: str) -> str:
+    return (FIXTURES / name).read_text(encoding="utf-8")
+
+
+# --- happy path: SBER all four types --------------------------------------
+
+
 @pytest.mark.asyncio
-async def test_run_writes_publications_for_ticker(tmp_path: Path) -> None:
-    html = (FIXTURES / "issuer_full.html").read_text(encoding="utf-8")
-    db, conn = _make_db_with_ticker(tmp_path, "SBER")
+async def test_run_iterates_four_types_and_writes_publications(
+    tmp_path: Path,
+) -> None:
+    """Discoverer must hit ``files.aspx`` for type 2/3/4/5 and skip type=1."""
+    pages = {
+        2: (200, _load("sber_type_2.html")),
+        3: (200, _load("sber_type_3.html")),
+        4: (200, _load("sber_type_4.html")),
+        # type=5 (issuer report) — issuer doesn't publish it: 404 ok.
+        5: (404, ""),
+    }
+    transport, seen = _per_type_transport(pages)
+    db, conn = _make_db_with_ticker(tmp_path, "SBER", e_disclosure_id="3043")
     try:
         publications_repo = PublicationsRepo(db, conn)
         async with EDisclosureClient(
@@ -49,35 +91,88 @@ async def test_run_writes_publications_for_ticker(tmp_path: Path) -> None:
             user_agent="edx-test/1.0",
             requests_per_second=100.0,
             respect_robots=False,
-            transport=_full_card_transport(html),
+            transport=transport,
         ) as client:
             service = DiscovererService(
-                client, publications_repo, backfill_years=3
+                client, publications_repo, backfill_years=20
             )
             new_pubs = await service.run(
-                [TickerEntry(ticker="SBER", e_disclosure_id="42", name="Sberbank")],
+                [TickerEntry(ticker="SBER", e_disclosure_id="3043", name="Sberbank")],
                 since={"SBER": None},
             )
-        assert len(new_pubs) == 5
-        in_db = list(
+        # 4 (type=2) + 13 (type=3) + 7 (type=4) = 24, type=5 was 404.
+        assert len(new_pubs) == 24
+        # Service hit exactly four files.aspx URLs (type=2,3,4,5),
+        # never type=1. Order may vary but the set must match.
+        crawled_types = sorted(
+            int(query.split("type=")[1])
+            for path, query in seen
+            if path == "/portal/files.aspx"
+        )
+        assert crawled_types == sorted(REPORT_TYPE_CODES)
+        assert 1 not in crawled_types
+    finally:
+        conn.close()
+
+
+@pytest.mark.asyncio
+async def test_run_persists_patch17_fields_to_repo(tmp_path: Path) -> None:
+    """The new report_type_code / period columns must round-trip into SQLite."""
+    pages = {
+        2: (200, "<html><body></body></html>"),
+        3: (200, "<html><body></body></html>"),
+        4: (200, _load("sber_type_4.html")),
+        5: (404, ""),
+    }
+    transport, _ = _per_type_transport(pages)
+    db, conn = _make_db_with_ticker(tmp_path, "SBER", e_disclosure_id="3043")
+    try:
+        publications_repo = PublicationsRepo(db, conn)
+        async with EDisclosureClient(
+            base_url="https://example.test",
+            user_agent="edx-test/1.0",
+            requests_per_second=100.0,
+            respect_robots=False,
+            transport=transport,
+        ) as client:
+            service = DiscovererService(
+                client, publications_repo, backfill_years=10
+            )
+            await service.run(
+                [TickerEntry(ticker="SBER", e_disclosure_id="3043", name="Sberbank")],
+                since={"SBER": None},
+            )
+
+        rows = list(
             conn.execute(
-                "SELECT publication_id, ticker, publication_type, "
-                "publication_date, status FROM publications ORDER BY "
-                "publication_date"
+                "SELECT publication_id, report_type_code, "
+                "reporting_period_year, reporting_period_type "
+                "FROM publications ORDER BY publication_date"
             )
         )
-        assert len(in_db) == 5
-        assert all(row[1] == "SBER" for row in in_db)
-        assert all(row[4] == "discovered" for row in in_db)
+        assert len(rows) == 7
+        assert all(row["report_type_code"] == 4 for row in rows)
+        assert all(row["reporting_period_year"] is not None for row in rows)
+        period_types = {row["reporting_period_type"] for row in rows}
+        assert {"Q1", "FY"}.issubset(period_types)
     finally:
         conn.close()
 
 
+# --- fail-soft: missing types --------------------------------------------
+
+
 @pytest.mark.asyncio
-async def test_run_is_incremental(tmp_path: Path) -> None:
-    """Publications already in the table at date D must not be re-added."""
-    html = (FIXTURES / "issuer_full.html").read_text(encoding="utf-8")
-    db, conn = _make_db_with_ticker(tmp_path, "SBER")
+async def test_run_continues_when_a_type_returns_404(tmp_path: Path) -> None:
+    """LKOH-style case: id=17 has no type=4 — service must still collect type=3."""
+    pages = {
+        2: (404, ""),
+        3: (200, _load("lkoh_type_3.html")),
+        4: (404, ""),  # the LKOH-style hole
+        5: (404, ""),
+    }
+    transport, _ = _per_type_transport(pages)
+    db, conn = _make_db_with_ticker(tmp_path, "LKOH", e_disclosure_id="17")
     try:
         publications_repo = PublicationsRepo(db, conn)
         async with EDisclosureClient(
@@ -85,72 +180,67 @@ async def test_run_is_incremental(tmp_path: Path) -> None:
             user_agent="edx-test/1.0",
             requests_per_second=100.0,
             respect_robots=False,
-            transport=_full_card_transport(html),
+            transport=transport,
         ) as client:
             service = DiscovererService(
-                client, publications_repo, backfill_years=3
+                client, publications_repo, backfill_years=20
             )
-            # First run — backfill all 5 publications.
-            first = await service.run(
-                [TickerEntry(ticker="SBER", e_disclosure_id="42", name="Sberbank")],
+            new_pubs = await service.run(
+                [TickerEntry(ticker="LKOH", e_disclosure_id="17", name="Lukoil")],
+                since={"LKOH": None},
+            )
+        assert len(new_pubs) == 60
+        assert all(pub.report_type_code == 3 for pub in new_pubs)
+    finally:
+        conn.close()
+
+
+@pytest.mark.asyncio
+async def test_run_continues_when_a_type_returns_empty_table(
+    tmp_path: Path,
+) -> None:
+    """200 OK with no ``table.files-table`` is the same as a missing type."""
+    empty_page = "<html><body><div>No items.</div></body></html>"
+    pages = {
+        2: (200, empty_page),
+        3: (200, _load("sber_type_3.html")),
+        4: (200, empty_page),
+        5: (200, empty_page),
+    }
+    transport, _ = _per_type_transport(pages)
+    db, conn = _make_db_with_ticker(tmp_path, "SBER", e_disclosure_id="3043")
+    try:
+        publications_repo = PublicationsRepo(db, conn)
+        async with EDisclosureClient(
+            base_url="https://example.test",
+            user_agent="edx-test/1.0",
+            requests_per_second=100.0,
+            respect_robots=False,
+            transport=transport,
+        ) as client:
+            service = DiscovererService(
+                client, publications_repo, backfill_years=10
+            )
+            new_pubs = await service.run(
+                [TickerEntry(ticker="SBER", e_disclosure_id="3043", name="Sberbank")],
                 since={"SBER": None},
             )
-            assert len(first) == 5
-
-            # Second run with since=latest — nothing new should be returned,
-            # nothing new written.
-            latest = publications_repo.latest_publication_date("SBER")
-            assert latest is not None
-            second = await service.run(
-                [TickerEntry(ticker="SBER", e_disclosure_id="42", name="Sberbank")],
-                since={"SBER": latest},
-            )
-            assert second == []
-
-            count = conn.execute(
-                "SELECT COUNT(*) AS c FROM publications"
-            ).fetchone()["c"]
-            assert count == 5
+        assert len(new_pubs) == 13  # only type=3 returned data
     finally:
         conn.close()
 
 
 @pytest.mark.asyncio
-async def test_run_filters_by_strict_greater_than(tmp_path: Path) -> None:
-    html = (FIXTURES / "issuer_full.html").read_text(encoding="utf-8")
-    db, conn = _make_db_with_ticker(tmp_path, "SBER")
-    try:
-        publications_repo = PublicationsRepo(db, conn)
-        async with EDisclosureClient(
-            base_url="https://example.test",
-            user_agent="edx-test/1.0",
-            requests_per_second=100.0,
-            respect_robots=False,
-            transport=_full_card_transport(html),
-        ) as client:
-            service = DiscovererService(
-                client, publications_repo, backfill_years=3
-            )
-            # since = 2026-03-15: only 2026-04-05 strictly > since.
-            new_pubs = await service.run(
-                [TickerEntry(ticker="SBER", e_disclosure_id="42", name="Sberbank")],
-                since={"SBER": "2026-03-15"},
-            )
-        assert len(new_pubs) == 1
-        assert new_pubs[0].publication_date == "2026-04-05"
-    finally:
-        conn.close()
-
-
-@pytest.mark.asyncio
-async def test_run_skips_ticker_when_card_returns_500(tmp_path: Path) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/robots.txt":
-            return httpx.Response(200, text="")
-        return httpx.Response(500, text="server error")
-
-    transport = httpx.MockTransport(handler)
-    db, conn = _make_db_with_ticker(tmp_path, "ROSN")
+async def test_run_continues_when_one_type_returns_500(tmp_path: Path) -> None:
+    """5xx on one type must not abort the whole crawl for the ticker."""
+    pages = {
+        2: (500, "boom"),
+        3: (200, _load("sber_type_3.html")),
+        4: (200, _load("sber_type_4.html")),
+        5: (404, ""),
+    }
+    transport, _ = _per_type_transport(pages)
+    db, conn = _make_db_with_ticker(tmp_path, "SBER", e_disclosure_id="3043")
     try:
         publications_repo = PublicationsRepo(db, conn)
         async with EDisclosureClient(
@@ -162,17 +252,57 @@ async def test_run_skips_ticker_when_card_returns_500(tmp_path: Path) -> None:
             transport=transport,
         ) as client:
             service = DiscovererService(
-                client, publications_repo, backfill_years=3
+                client, publications_repo, backfill_years=10
             )
             new_pubs = await service.run(
-                [TickerEntry(ticker="ROSN", e_disclosure_id="42", name="Rosneft")],
-                since={"ROSN": None},
+                [TickerEntry(ticker="SBER", e_disclosure_id="3043", name="Sberbank")],
+                since={"SBER": None},
             )
-        assert new_pubs == []
-        count = conn.execute(
-            "SELECT COUNT(*) AS c FROM publications"
-        ).fetchone()["c"]
-        assert count == 0
+        # Same shape as if type=2 had been empty: 13+7=20 rows.
+        assert len(new_pubs) == 20
+    finally:
+        conn.close()
+
+
+# --- incremental + helpers (unchanged contracts) --------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_filters_by_strict_greater_than(tmp_path: Path) -> None:
+    pages = {
+        2: (404, ""),
+        3: (404, ""),
+        4: (200, _load("sber_type_4.html")),
+        5: (404, ""),
+    }
+    transport, _ = _per_type_transport(pages)
+    db, conn = _make_db_with_ticker(tmp_path, "SBER", e_disclosure_id="3043")
+    try:
+        publications_repo = PublicationsRepo(db, conn)
+        async with EDisclosureClient(
+            base_url="https://example.test",
+            user_agent="edx-test/1.0",
+            requests_per_second=100.0,
+            respect_robots=False,
+            transport=transport,
+        ) as client:
+            service = DiscovererService(
+                client, publications_repo, backfill_years=10
+            )
+            # First run without filter: expect 7 type=4 publications.
+            first = await service.run(
+                [TickerEntry(ticker="SBER", e_disclosure_id="3043", name="Sberbank")],
+                since={"SBER": None},
+            )
+            assert len(first) == 7
+            latest = publications_repo.latest_publication_date("SBER")
+            assert latest is not None
+            # Second run with since=latest: nothing new.
+            second = await service.run(
+                [TickerEntry(ticker="SBER", e_disclosure_id="3043", name="Sberbank")],
+                since={"SBER": latest},
+            )
+            assert second == []
     finally:
         conn.close()
 

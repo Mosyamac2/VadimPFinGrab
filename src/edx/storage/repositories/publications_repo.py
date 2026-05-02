@@ -7,6 +7,7 @@ import sqlite3
 from edx.storage.db import Database, now_iso
 from edx.storage.models import (
     ALLOWED_PUBLICATION_STATUSES,
+    PeriodType,
     PublicationRow,
     PublicationStatus,
     PublicationType,
@@ -26,10 +27,19 @@ class PublicationsRepo:
         publication_type: PublicationType,
         publication_date: str,
         source_url: str,
+        report_type_code: int | None = None,
+        report_type_label: str | None = None,
+        reporting_period_year: int | None = None,
+        reporting_period_type: PeriodType | None = None,
     ) -> bool:
         """Insert a freshly-discovered publication. No-op if already known.
 
         Returns True if a new row was inserted.
+
+        ``report_type_code`` / ``report_type_label`` / ``reporting_period_*``
+        are filled by the Discoverer (Patch 16) directly from the listing page
+        URL and table; they remain ``None`` for ``publication_type='event'``
+        and for legacy rows from before Patch 17.
         """
         timestamp = now_iso()
         with self.db.transaction(self.conn):
@@ -37,8 +47,10 @@ class PublicationsRepo:
                 """
                 INSERT INTO publications (
                     publication_id, ticker, publication_type, publication_date,
-                    source_url, status, discovered_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, 'discovered', ?, ?)
+                    source_url, status, discovered_at, updated_at,
+                    report_type_code, report_type_label,
+                    reporting_period_year, reporting_period_type
+                ) VALUES (?, ?, ?, ?, ?, 'discovered', ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(publication_id) DO NOTHING
                 """,
                 (
@@ -49,6 +61,10 @@ class PublicationsRepo:
                     source_url,
                     timestamp,
                     timestamp,
+                    report_type_code,
+                    report_type_label,
+                    reporting_period_year,
+                    reporting_period_type,
                 ),
             )
             return cursor.rowcount > 0
@@ -153,6 +169,29 @@ class PublicationsRepo:
         )
         return [_row_to_publication(row) for row in cursor]
 
+    def list_by_period(
+        self,
+        ticker: str,
+        reporting_period_year: int,
+        reporting_period_type: PeriodType,
+    ) -> list[PublicationRow]:
+        """Return every publication of this ticker for the given period.
+
+        Used by the Metric Extractor (Patch 19/21) to pick the best source
+        among IFRS / RSBU / ISSUER for the same reporting period.
+        """
+        cursor = self.conn.execute(
+            """
+            SELECT * FROM publications
+             WHERE ticker = ?
+               AND reporting_period_year = ?
+               AND reporting_period_type = ?
+             ORDER BY publication_date DESC
+            """,
+            (ticker, reporting_period_year, reporting_period_type),
+        )
+        return [_row_to_publication(row) for row in cursor]
+
 
 def _row_to_publication(row: sqlite3.Row) -> PublicationRow:
     return PublicationRow(
@@ -167,4 +206,8 @@ def _row_to_publication(row: sqlite3.Row) -> PublicationRow:
         discovered_at=row["discovered_at"],
         updated_at=row["updated_at"],
         is_incomplete=row["is_incomplete"],
+        report_type_code=row["report_type_code"],
+        report_type_label=row["report_type_label"],
+        reporting_period_year=row["reporting_period_year"],
+        reporting_period_type=row["reporting_period_type"],
     )

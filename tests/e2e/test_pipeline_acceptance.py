@@ -84,44 +84,85 @@ def _ifrs_report_body(ticker: str) -> str:
     ) * 12
 
 
-_ISSUER_CARDS = {
-    "1": (
+def _files_listing_page(
+    *,
+    file_id: str,
+    type_label: str,
+    period_text: str,
+    publication_date_ddmmyyyy: str,
+    href: str,
+) -> str:
+    """Synthetic real-shaped ``table.files-table`` page for one row.
+
+    Mirrors the real e-disclosure DOM that Patch 16 parses: 7 cells per row,
+    last cell is the empty cert column, file link carries ``data-fileid``.
+    """
+    return (
         "<html><body>"
-        "<section class='publications-section' data-section='reports'>"
-        "<ul class='publications-list'>"
-        "<li class='publication-row'>"
-        "<span class='publication-date'>15.03.2026</span>"
-        "<a class='publication-link' href='/portal/files/SBER/2025-fy.pdf'>"
-        "MSFO 2025</a>"
-        "</li></ul></section>"
-        "<section class='publications-section' data-section='events'>"
-        "<ul class='publications-list'>"
-        "<li class='publication-row'>"
-        "<span class='publication-date'>10.04.2026</span>"
-        "<a class='publication-link' href='/portal/messages/SBER-divs.html'>"
-        "Dividends decision</a>"
-        "</li></ul></section>"
+        "<table class='files-table'><tbody>"
+        "<tr><th>№</th><th>Тип документа</th><th>Отчётный период</th>"
+        "<th>Дата основания</th><th>Дата размещения</th>"
+        "<th>Файл</th><th></th></tr>"
+        "<tr>"
+        "<td class='row-number-cell'>1</td>"
+        f"<td class='type-cell'>{type_label}</td>"
+        f"<td>{period_text}</td>"
+        f"<td class='date-cell'>{publication_date_ddmmyyyy}</td>"
+        f"<td class='date-cell'>{publication_date_ddmmyyyy}</td>"
+        "<td class='file-cell'>"
+        f"<a class='file-link' href='{href}' data-fileid='{file_id}'>zip</a>"
+        "</td>"
+        "<td class='cert-cell'></td>"
+        "</tr></tbody></table>"
         "</body></html>"
+    )
+
+
+# Listings keyed by (e_disclosure_id, type_code). Only IFRS (type=4) carries
+# a row in this fixture set; other types return an empty page so Discoverer
+# logs ``discoverer_no_publications_for_type`` and moves on. Events are no
+# longer Discoverer's responsibility — they're seeded directly into the DB.
+_LISTING_PAGES: dict[tuple[str, int], str] = {
+    # Annual MSFO publications are intentionally dated AFTER the seeded
+    # event publications (10/12 April) so the incremental ``since`` cutoff
+    # (= latest_publication_date(ticker)) doesn't filter them out.
+    ("1", 4): _files_listing_page(
+        file_id="SBER-FY2025",
+        type_label="Годовая консолидированная финансовая отчетность по МСФО",
+        period_text="2025",
+        publication_date_ddmmyyyy="15.04.2026",
+        href="/portal/files/SBER/2025-fy.pdf",
     ),
-    "2": (
-        "<html><body>"
-        "<section class='publications-section' data-section='reports'>"
-        "<ul class='publications-list'>"
-        "<li class='publication-row'>"
-        "<span class='publication-date'>20.03.2026</span>"
-        "<a class='publication-link' href='/portal/files/GAZP/2025-fy.pdf'>"
-        "MSFO 2025</a>"
-        "</li></ul></section>"
-        "<section class='publications-section' data-section='events'>"
-        "<ul class='publications-list'>"
-        "<li class='publication-row'>"
-        "<span class='publication-date'>12.04.2026</span>"
-        "<a class='publication-link' href='/portal/messages/GAZP-mgmt.html'>"
-        "Management change</a>"
-        "</li></ul></section>"
-        "</body></html>"
+    ("2", 4): _files_listing_page(
+        file_id="GAZP-FY2025",
+        type_label="Годовая консолидированная финансовая отчетность по МСФО",
+        period_text="2025",
+        publication_date_ddmmyyyy="20.04.2026",
+        href="/portal/files/GAZP/2025-fy.pdf",
     ),
 }
+
+_EMPTY_LISTING_PAGE = "<html><body><div>No items.</div></body></html>"
+
+
+# Pre-seeded event publications — these are inserted directly into
+# ``publications`` before the orchestrator runs, since Patch 16 narrows
+# Discoverer's scope to report sources only. The Downloader/Event Extractor
+# pick them up via the standard ``publications`` table flow.
+_SEEDED_EVENTS = [
+    {
+        "publication_id": "SBER-event-divs-2026-04-10",
+        "ticker": "SBER",
+        "publication_date": "2026-04-10",
+        "source_url": "/portal/messages/SBER-divs.html",
+    },
+    {
+        "publication_id": "GAZP-event-mgmt-2026-04-12",
+        "ticker": "GAZP",
+        "publication_date": "2026-04-12",
+        "source_url": "/portal/messages/GAZP-mgmt.html",
+    },
+]
 
 _EVENT_HTMLS = {
     "/portal/messages/SBER-divs.html": (
@@ -260,9 +301,16 @@ def _build_transport(
             return httpx.Response(500, text="boom")
         if path == "/robots.txt":
             return httpx.Response(200, text="")
-        if path == "/portal/company.aspx":
+        if path == "/portal/files.aspx":
             issuer_id = request.url.params.get("id", "")
-            html = _ISSUER_CARDS.get(issuer_id, "<html><body></body></html>")
+            type_str = request.url.params.get("type", "")
+            try:
+                type_code = int(type_str)
+            except ValueError:
+                return httpx.Response(404, text="bad type")
+            html = _LISTING_PAGES.get(
+                (issuer_id, type_code), _EMPTY_LISTING_PAGE
+            )
             return httpx.Response(
                 200, text=html, headers={"Content-Type": "text/html"}
             )
@@ -331,6 +379,19 @@ def _make_workspace(tmp_path: Path) -> _Workspace:
     runs_repo = RunsRepo(db, conn)
     tickers_repo = TickersRepo(db, conn)
     tickers_repo.upsert_from_config(settings.tickers.tickers)
+
+    # Seed event publications directly: after Patch 16, Discoverer no longer
+    # produces events from the issuer card — events come from a dedicated
+    # feed (not yet implemented). The downstream Downloader / Event
+    # Extractor stages don't care who inserted the row.
+    for ev in _SEEDED_EVENTS:
+        publications_repo.upsert_discovered(
+            publication_id=ev["publication_id"],
+            ticker=ev["ticker"],
+            publication_type="event",
+            publication_date=ev["publication_date"],
+            source_url=ev["source_url"],
+        )
 
     return _Workspace(
         settings=settings,
