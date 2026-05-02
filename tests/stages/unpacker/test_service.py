@@ -64,6 +64,56 @@ def _service(
     )
 
 
+def test_zip_detected_by_magic_bytes_when_extension_missing(
+    tmp_path: Path,
+) -> None:
+    """Real-world e-disclosure case: ``FileLoad.ashx`` body is a ZIP but
+    the filename has no ``.zip`` suffix. Magic-byte sniffing should still
+    extract it; otherwise the publication silently goes to Classifier
+    with zero PDFs and the whole pipeline skips it (saw this in prod)."""
+    db, conn, pub_dir = _seed_publication(tmp_path)
+    raw_dir = tmp_path / "raw"
+
+    # Filename matches what live Downloader writes for FileLoad.ashx URLs.
+    archive = pub_dir / "FileLoad.ashx"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("report.pdf", b"PDF-BYTES")
+
+    try:
+        service = _service(db, conn, raw_dir=raw_dir)
+        pub = PublicationsRepo(db, conn).get_by_id("pub-1")
+        assert pub is not None
+        outcomes = service.run([pub])
+    finally:
+        conn.close()
+
+    assert outcomes[0].archives_extracted == 1
+    assert outcomes[0].documents_added == 1
+    assert (pub_dir / "_unpacked" / "report.pdf").read_bytes() == b"PDF-BYTES"
+
+
+def test_non_archive_file_without_extension_is_inventoried_not_extracted(
+    tmp_path: Path,
+) -> None:
+    """A non-archive payload (HTML, text, JSON) that happens to have no
+    extension shouldn't be force-decoded as ZIP — it goes into the
+    documents inventory as-is."""
+    db, conn, pub_dir = _seed_publication(tmp_path)
+    raw_dir = tmp_path / "raw"
+    (pub_dir / "FileLoad.ashx").write_bytes(b"<html>not a zip</html>")
+
+    try:
+        service = _service(db, conn, raw_dir=raw_dir)
+        pub = PublicationsRepo(db, conn).get_by_id("pub-1")
+        assert pub is not None
+        outcomes = service.run([pub])
+    finally:
+        conn.close()
+
+    assert outcomes[0].archives_extracted == 0
+    assert outcomes[0].documents_added == 1
+
+
 def test_zip_extracted_and_documents_inventoried(tmp_path: Path) -> None:
     db, conn, pub_dir = _seed_publication(tmp_path)
     raw_dir = tmp_path / "raw"

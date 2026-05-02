@@ -37,6 +37,44 @@ from edx.storage import (
 UNPACKED_SUBDIR: Final[str] = "_unpacked"
 SUPPORTED_ARCHIVE_SUFFIXES: Final[frozenset[str]] = frozenset({".zip", ".rar"})
 
+# Magic bytes for archive detection (used when the file extension is missing
+# or wrong — e-disclosure's FileLoad.ashx endpoint serves zip bytes under
+# the literal filename "FileLoad.ashx" with no extension and no
+# Content-Disposition the Downloader could lean on).
+_ZIP_MAGIC_PREFIXES: Final[tuple[bytes, ...]] = (
+    b"PK\x03\x04",  # standard non-empty zip
+    b"PK\x05\x06",  # empty zip
+    b"PK\x07\x08",  # spanned zip (rare)
+)
+_RAR_MAGIC_PREFIXES: Final[tuple[bytes, ...]] = (
+    b"Rar!\x1a\x07\x00",  # RAR v1.5..4
+    b"Rar!\x1a\x07\x01\x00",  # RAR v5
+)
+
+
+def _detect_archive_kind(path: Path) -> str | None:
+    """Return ``"zip"``/``"rar"`` for a recognised archive, else ``None``.
+
+    Suffix wins when present; otherwise we sniff the first ~8 bytes of the
+    file. Suffix-first keeps the cost on big files at zero — magic-sniff
+    only kicks in on suspiciously-named downloads.
+    """
+    suffix = path.suffix.lower()
+    if suffix == ".zip":
+        return "zip"
+    if suffix == ".rar":
+        return "rar"
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(8)
+    except OSError:
+        return None
+    if any(head.startswith(prefix) for prefix in _ZIP_MAGIC_PREFIXES):
+        return "zip"
+    if any(head.startswith(prefix) for prefix in _RAR_MAGIC_PREFIXES):
+        return "rar"
+    return None
+
 
 class UnpackerError(RuntimeError):
     """Raised when extraction trips a safety check (traversal, size limit)."""
@@ -93,18 +131,27 @@ class UnpackerService:
             return None
 
         unpacked_dir = pub_dir / UNPACKED_SUBDIR
-        archives = sorted(
-            p
-            for p in pub_dir.iterdir()
-            if p.is_file() and p.suffix.lower() in SUPPORTED_ARCHIVE_SUFFIXES
+        # Archive detection is magic-bytes-first (extension only as a hint).
+        # Live e-disclosure's FileLoad.ashx serves ZIP under literal filename
+        # ``FileLoad.ashx`` — extension-only matching would silently treat it
+        # as a non-archive document and the whole publication would skip
+        # the Classifier (no PDF inside).
+        archives_with_kind: list[tuple[Path, str]] = sorted(
+            (
+                (p, kind)
+                for p in pub_dir.iterdir()
+                if p.is_file() and (kind := _detect_archive_kind(p)) is not None
+            ),
+            key=lambda pair: str(pair[0]),
         )
+        archives = [a for a, _ in archives_with_kind]
 
         archives_extracted = 0
-        if archives:
+        if archives_with_kind:
             unpacked_dir.mkdir(parents=True, exist_ok=True)
             try:
-                for archive in archives:
-                    self._extract(archive, unpacked_dir)
+                for archive, kind in archives_with_kind:
+                    self._extract(archive, unpacked_dir, kind=kind)
                     archives_extracted += 1
             except UnpackerError as exc:
                 self._log.error(
@@ -142,15 +189,16 @@ class UnpackerService:
             skipped=False,
         )
 
-    def _extract(self, archive: Path, target_dir: Path) -> None:
-        suffix = archive.suffix.lower()
-        if suffix == ".zip":
+    def _extract(self, archive: Path, target_dir: Path, *, kind: str) -> None:
+        if kind == "zip":
             self._extract_zip(archive, target_dir)
-        elif suffix == ".rar":
+        elif kind == "rar":
             self._extract_rar(archive, target_dir)
         else:
             self._log.warning(
-                "unsupported_archive_suffix", archive=str(archive)
+                "unsupported_archive_kind",
+                archive=str(archive),
+                kind=kind,
             )
 
     def _extract_zip(self, archive: Path, target_dir: Path) -> None:
