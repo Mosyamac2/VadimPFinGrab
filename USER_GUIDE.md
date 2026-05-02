@@ -368,7 +368,7 @@ sudo systemctl status edx-update.timer
 | `config/metrics.yaml` | Внутри `profiles.bank` / `profiles.non_bank` — добавлять метрики и синонимы (каждый синоним аннотируется реальной фикстурой); `only_in_sources` / `aggregation_hint` для тонкой настройки | Структуру `profiles:` (ломающее изменение Patch 19); `reporting_priority` без необходимости |
 | `config/event_types.yaml` | Новые типы событий | Запись с `code: other` (обязательна) |
 | `config/app.yaml` | `schedule.cron_time`, `google_drive.*`, `validator.completeness_threshold`, `discoverer.requests_per_second` | Все `paths:` |
-| `config/llm.yaml` | `cache_enabled`, `concurrency`, `max_retries` | `model` без причины |
+| `config/llm.yaml` | `cache_enabled`, `concurrency`, `max_retries`, `primary.cache_ttl` (`5m` \| `1h`) | `model` без причины |
 | `config/ocr.yaml` | `tesseract_dpi` (300/400/600) | `engine` — пока поддерживается только `tesseract` |
 
 ### Что значат основные параметры
@@ -404,12 +404,24 @@ google_drive:
 ```yaml
 primary:
   model: claude-sonnet-4-6      # модель Anthropic — менять не нужно
+  enable_prompt_caching: true   # системный промпт кешируется на стороне Anthropic (0.1× за чтение, exempt от ITPM)
+  cache_ttl: 1h                 # 1h | 5m. На длинных прогонах (>15 мин) держите 1h
 fallback:
   model: anthropic/claude-sonnet-4.6   # на OpenRouter
 max_tokens: 4096
 temperature: 0.0                # 0 = стабильные ответы, не повышать
-cache_enabled: true             # сохранять ответы LLM на диск, экономит деньги
+cache_enabled: true             # дисковый кеш ответов в data/processed/_llm_cache; экономит деньги при повторных прогонах
 ```
+
+После запуска в `logs/pipeline.log` каждое событие
+`metric_extract_completed` несёт `cache_read_input_tokens`,
+`cache_creation_input_tokens` и `cache_hit_ratio`. На втором и
+последующих вызовах за прогон ratio должен быть в районе 0.05–0.15
+(системный промпт ~1.5к токенов из ~20–50к запроса). Если ratio
+устойчиво 0 на всех публикациях — проверьте, что
+`enable_prompt_caching: true` и системный промпт не меняется между
+вызовами (изменение `metrics.yaml` или добавление тикера сбрасывают
+cache).
 
 ---
 
