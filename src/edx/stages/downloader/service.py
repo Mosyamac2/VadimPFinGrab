@@ -152,6 +152,16 @@ class DownloaderService:
                 hash=pub.file_hash,
             )
             inventoried = self._inventory_existing(pub_dir, primary=main_path)
+            # Bugfix: dedup-skip used to leave the publication in
+            # ``discovered`` and the orchestrator's downstream stages
+            # (Unpacker, Classifier, …) never picked it up. After
+            # ``edx run --full-reload`` resets every status to
+            # ``discovered``, the Downloader sees the file already on
+            # disk with a matching hash, skips the HTTP fetch, and now
+            # also advances the status so the rest of the pipeline runs.
+            self.publications_repo.mark_status(
+                pub.publication_id, "downloaded", file_hash=pub.file_hash
+            )
             return DownloadOutcome(
                 publication_id=pub.publication_id,
                 files=inventoried,

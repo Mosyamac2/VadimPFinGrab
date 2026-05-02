@@ -83,7 +83,47 @@ _RULES: tuple[tuple[re.Pattern[str], PeriodType], ...] = (
         ),
         "9M",
     ),
-    # "1 квартал 2025" / "I квартал 2025"
+    # "2025, 12 месяцев" — Issuer-Report-style annual period (type=5).
+    # Treated as full year just like the bare-year form.
+    (
+        re.compile(
+            r"^(?P<year>\d{4})[\s,]+12\s+(?:мес\.?|месяцев|месяца)$",
+            re.IGNORECASE,
+        ),
+        "FY",
+    ),
+    # "2021, 1 квартал" / "2021, I квартал" — issuer-report quarter labels
+    # (year-first comma form, observed on type=5 listings).
+    (
+        re.compile(
+            r"^(?P<year>\d{4})[\s,]+(?:1|I)\s+квартал$",
+            re.IGNORECASE,
+        ),
+        "Q1",
+    ),
+    (
+        re.compile(
+            r"^(?P<year>\d{4})[\s,]+(?:2|II)\s+квартал$",
+            re.IGNORECASE,
+        ),
+        "Q2",
+    ),
+    (
+        re.compile(
+            r"^(?P<year>\d{4})[\s,]+(?:3|III)\s+квартал$",
+            re.IGNORECASE,
+        ),
+        "Q3",
+    ),
+    (
+        re.compile(
+            r"^(?P<year>\d{4})[\s,]+(?:4|IV)\s+квартал$",
+            re.IGNORECASE,
+        ),
+        "Q4",
+    ),
+    # "1 квартал 2025" / "I квартал 2025" — quarter-first form (older
+    # listings). Kept alongside the year-first form above.
     (
         re.compile(
             r"^(?:1|I|первый)\s+квартал[\s,]+(?P<year>\d{4})$",
