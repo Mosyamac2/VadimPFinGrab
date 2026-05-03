@@ -24,7 +24,9 @@ import yaml
 
 from edx.config import AppSettings
 from edx.evolve import bundle as bundle_module
+from edx.evolve import canaries as canaries_module
 from edx.evolve import claude_runner as claude_runner_module
+from edx.evolve import git_ops as git_ops_module
 from edx.evolve import memory as memory_module
 from edx.evolve.csv_loader import load_companies
 from edx.evolve.picker import PickerInput, pick_next_batch
@@ -316,6 +318,22 @@ def run_one_tick(
             else ""
         )
 
+        # Patch 43: agent runs on a dedicated branch evolve/tick-N so
+        # any partial edit can be discarded without touching master.
+        try:
+            git_ops_module.create_tick_branch(Path("."), tick_id)
+        except Exception as exc:  # noqa: BLE001
+            log.error("evolve_git_branch_failed", error=str(exc))
+            repo.update_tick(
+                tick_id,
+                phase="failed",
+                verdict="fail",
+                error_summary=f"git_branch_failed: {exc!r}",
+                finished_at=_utc_now_iso(),
+                **common_update_kwargs,
+            )
+            return tick_id
+
         claude_res = claude_runner_module.run_agent(
             bundle_dir=bundle_dir,
             tick_id=tick_id,
@@ -332,47 +350,180 @@ def run_one_tick(
             memory_before, memory_after, tick_id
         )
 
-        # In Patch 42 we still don't commit / merge — gate logic lands
-        # in Patch 43. We persist the agent metadata and fall through to
-        # phase=failed with a descriptive verdict so dry-runs are easy
-        # to audit.
-        if not claude_res.modified_files:
-            verdict_after_agent: VerdictCode = "fail"
-            agent_error = "claude_no_changes"
-        elif not memory_updated:
-            verdict_after_agent = "fail"
-            agent_error = "memory_not_updated"
-        else:
-            verdict_after_agent = "neutral"
-            agent_error = "patch42_pre_gate"
-
-        if claude_res.is_error:
-            verdict_after_agent = "fail"
-            agent_error = (
-                claude_res.error_summary or "claude_run_error"
+        # ---- Patch 43 verdict gate ----
+        gate_failure = _gate_check_after_agent(
+            claude_res=claude_res,
+            memory_updated=memory_updated,
+        )
+        if gate_failure is not None:
+            git_ops_module.abandon_branch(Path("."), tick_id)
+            verdict_code: VerdictCode = "fail"
+            repo.update_tick(
+                tick_id,
+                phase="failed",
+                verdict=verdict_code,
+                claude_session=claude_res.session_id,
+                claude_cost_usd=claude_res.cost_usd,
+                claude_turns=claude_res.turns,
+                error_summary=gate_failure,
+                finished_at=_utc_now_iso(),
+                **common_update_kwargs,
             )
+            _bump_skiplist_for_failing(repo, batch, verdicts, tick_id)
+            log.info(
+                "evolve_tick_finished",
+                tick_id=tick_id,
+                verdict=verdict_code,
+                agent_error=gate_failure,
+                agent_cost=claude_res.cost_usd,
+            )
+            return tick_id
+
+        # tests gate
+        if not _run_make_target(Path("."), "test"):
+            git_ops_module.abandon_branch(Path("."), tick_id)
+            repo.update_tick(
+                tick_id,
+                phase="failed",
+                verdict="regression_tests",
+                claude_session=claude_res.session_id,
+                claude_cost_usd=claude_res.cost_usd,
+                claude_turns=claude_res.turns,
+                error_summary="make_test_red",
+                finished_at=_utc_now_iso(),
+                **common_update_kwargs,
+            )
+            _bump_skiplist_for_failing(repo, batch, verdicts, tick_id)
+            log.info(
+                "evolve_tick_finished",
+                tick_id=tick_id,
+                verdict="regression_tests",
+            )
+            return tick_id
+
+        # canary gate
+        canary_reports = canaries_module.check_canaries(
+            conn, canaries_module.canary_baseline_path(settings.app.paths.state_db)
+        )
+        if not all(c.ok for c in canary_reports):
+            git_ops_module.abandon_branch(Path("."), tick_id)
+            failing_canaries = [c.ticker for c in canary_reports if not c.ok]
+            repo.update_tick(
+                tick_id,
+                phase="failed",
+                verdict="regression_canary",
+                claude_session=claude_res.session_id,
+                claude_cost_usd=claude_res.cost_usd,
+                claude_turns=claude_res.turns,
+                error_summary=f"canaries failed: {failing_canaries}",
+                finished_at=_utc_now_iso(),
+                **common_update_kwargs,
+            )
+            _bump_skiplist_for_failing(repo, batch, verdicts, tick_id)
+            log.info(
+                "evolve_tick_finished",
+                tick_id=tick_id,
+                verdict="regression_canary",
+            )
+            return tick_id
+
+        # batch improvement gate: re-run pipeline on the batch and
+        # confirm at least one previously-failing ticker is now ok and
+        # nobody regressed.
+        retry_log = bundle_dir / "pipeline.log.retry"
+        retry_result = run_pipeline_on_batch(
+            tickers=synthetic_tickers,
+            config_dir=evolve_config_dir,
+            log_path=retry_log,
+            timeout_seconds=pipeline_timeout_s,
+        )
+        snaps_retry = snapshot_batch(conn, synthetic_tickers)
+        verdicts_retry: dict[str, TickerVerdict] = {
+            t: compute_verdict(
+                snaps_before[t],
+                snaps_retry[t],
+                pipeline_returncode=retry_result.returncode,
+            )
+            for t in synthetic_tickers
+        }
+        improved, not_regressed = _batch_improvement(verdicts, verdicts_retry)
+
+        if not (improved and not_regressed):
+            git_ops_module.abandon_branch(Path("."), tick_id)
+            reason = ",".join(
+                ([] if improved else ["no_improvement"])
+                + ([] if not_regressed else ["regression"])
+            )
+            verdict_code = "regression" if not not_regressed else "fail"
+            repo.update_tick(
+                tick_id,
+                phase="failed",
+                verdict=verdict_code,
+                claude_session=claude_res.session_id,
+                claude_cost_usd=claude_res.cost_usd,
+                claude_turns=claude_res.turns,
+                error_summary=reason,
+                finished_at=_utc_now_iso(),
+                **common_update_kwargs,
+            )
+            _bump_skiplist_for_failing(repo, batch, verdicts_retry, tick_id)
+            log.info(
+                "evolve_tick_finished",
+                tick_id=tick_id,
+                verdict=verdict_code,
+                reason=reason,
+            )
+            return tick_id
+
+        # All gates green — auto-merge.
+        commit_message = _compose_commit_message(
+            tick_id=tick_id,
+            batch=batch,
+            verdicts=verdicts,
+            verdicts_retry=verdicts_retry,
+            claude_res=claude_res,
+        )
+        merge_res = git_ops_module.commit_and_merge(
+            Path("."), tick_id, commit_message, push=True
+        )
+        if not merge_res.pushed or merge_res.commit_sha is None:
+            git_ops_module.abandon_branch(Path("."), tick_id)
+            repo.update_tick(
+                tick_id,
+                phase="failed",
+                verdict="fail",
+                claude_session=claude_res.session_id,
+                claude_cost_usd=claude_res.cost_usd,
+                claude_turns=claude_res.turns,
+                error_summary=f"git_failed: {merge_res.notes}",
+                finished_at=_utc_now_iso(),
+                **common_update_kwargs,
+            )
+            log.warning(
+                "evolve_tick_git_merge_failed",
+                tick_id=tick_id,
+                notes=merge_res.notes,
+            )
+            return tick_id
 
         repo.update_tick(
             tick_id,
-            phase="failed",
-            verdict=verdict_after_agent,
+            phase="done",
+            verdict="ok",
             claude_session=claude_res.session_id,
             claude_cost_usd=claude_res.cost_usd,
             claude_turns=claude_res.turns,
-            error_summary=agent_error,
+            commit_sha=merge_res.commit_sha,
             finished_at=_utc_now_iso(),
             **common_update_kwargs,
         )
         log.info(
             "evolve_tick_finished",
             tick_id=tick_id,
-            verdict=verdict_after_agent,
-            agent_enabled=True,
-            agent_modified_files=len(claude_res.modified_files),
-            memory_updated=memory_updated,
+            verdict="ok",
+            commit_sha=merge_res.commit_sha,
             agent_cost=claude_res.cost_usd,
             agent_turns=claude_res.turns,
-            agent_error=agent_error,
         )
         return tick_id
 
@@ -384,6 +535,93 @@ def _save_snapshots(
     path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
+    )
+
+
+def _gate_check_after_agent(
+    *,
+    claude_res: claude_runner_module.ClaudeRunResult,
+    memory_updated: bool,
+) -> str | None:
+    """Return error string when the agent run is rejected pre-tests.
+
+    Returns ``None`` when we should advance to tests/canaries/batch gates.
+    """
+    if claude_res.is_error:
+        return claude_res.error_summary or "claude_run_error"
+    if not claude_res.modified_files:
+        return "claude_no_changes"
+    if not memory_updated:
+        return "memory_not_updated"
+    return None
+
+
+def _run_make_target(cwd: Path, target: str) -> bool:
+    """Returns True iff `make TARGET` exits with code 0."""
+    import subprocess
+
+    proc = subprocess.run(
+        ["make", target], cwd=str(cwd), capture_output=True, text=True
+    )
+    return proc.returncode == 0
+
+
+def _batch_improvement(
+    before_verdicts: dict[str, TickerVerdict],
+    after_verdicts: dict[str, TickerVerdict],
+) -> tuple[bool, bool]:
+    improved = any(
+        before_verdicts[t].code in ("fail", "regression")
+        and after_verdicts[t].code == "ok"
+        for t in before_verdicts
+    )
+    not_regressed = all(
+        after_verdicts[t].code != "regression"
+        for t in before_verdicts
+    )
+    return improved, not_regressed
+
+
+def _bump_skiplist_for_failing(
+    repo: EvolutionRepo,
+    batch: list,  # type: ignore[type-arg]
+    verdicts: dict[str, TickerVerdict],
+    tick_id: int,
+) -> None:
+    for company in batch:
+        ticker = company.synthetic_ticker
+        verdict = verdicts.get(ticker)
+        if verdict is None or verdict.code == "ok":
+            continue
+        repo.bump_failure(company.company_id, tick_id)
+
+
+def _compose_commit_message(
+    *,
+    tick_id: int,
+    batch: list,  # type: ignore[type-arg]
+    verdicts: dict[str, TickerVerdict],
+    verdicts_retry: dict[str, TickerVerdict],
+    claude_res: claude_runner_module.ClaudeRunResult,
+) -> str:
+    tickers = [c.synthetic_ticker for c in batch]
+    improved = [
+        t
+        for t in tickers
+        if verdicts[t].code in ("fail", "regression")
+        and verdicts_retry[t].code == "ok"
+    ]
+    return (
+        f"evolve({tick_id}): batch [{','.join(tickers)}]\n"
+        f"\n"
+        f"companies improved: {improved}\n"
+        f"per-ticker before: { {t: verdicts[t].code for t in tickers} }\n"
+        f"per-ticker after:  { {t: verdicts_retry[t].code for t in tickers} }\n"
+        f"\n"
+        f"Claude Code session: {claude_res.session_id}\n"
+        f"Cost: ${claude_res.cost_usd:.3f}  Turns: {claude_res.turns}\n"
+        f"\n"
+        f"Updated evolution/MEMORY.md.\n"
     )
 
 

@@ -260,9 +260,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     cache_prune_p.set_defaults(func=_cmd_cache_prune)
 
-    # Patch 40: self-evolution loop. Patches 42+ wire Claude Code; for now
-    # ``edx evolve tick`` runs the baseline pipeline on a batch of 3 and
-    # records a verdict. Operators can run it manually for debugging.
+    # Patch 40-43: self-evolution loop.
     evolve_p = subparsers.add_parser(
         "evolve",
         help="Self-evolution loop subcommands (Patch 38+).",
@@ -270,14 +268,57 @@ def _build_parser() -> argparse.ArgumentParser:
     evolve_sub = evolve_p.add_subparsers(
         dest="evolve_command", required=True, metavar="subcommand"
     )
+
     evolve_tick_p = evolve_sub.add_parser(
-        "tick",
-        help=(
-            "Run one self-evolution tick over a batch of 3 companies "
-            "from e-disclosure-companies.csv. Patch 40: baseline only."
-        ),
+        "tick", help="Run one self-evolution tick over a batch of 3 companies."
     )
     evolve_tick_p.set_defaults(func=_cmd_evolve_tick)
+
+    evolve_status_p = evolve_sub.add_parser(
+        "status", help="Show recent ticks from evolution_ticks."
+    )
+    evolve_status_p.add_argument("--limit", type=int, default=10)
+    evolve_status_p.set_defaults(func=_cmd_evolve_status)
+
+    evolve_report_p = evolve_sub.add_parser(
+        "report",
+        help="Aggregate stats over the last 7 days (verdicts, cost, skiplist).",
+    )
+    evolve_report_p.set_defaults(func=_cmd_evolve_report)
+
+    evolve_reset_p = evolve_sub.add_parser(
+        "reset", help="Remove a company from the skiplist."
+    )
+    evolve_reset_p.add_argument("--company-id", required=True)
+    evolve_reset_p.set_defaults(func=_cmd_evolve_reset)
+
+    evolve_canary_p = evolve_sub.add_parser(
+        "canary", help="Canary baseline subcommands."
+    )
+    evolve_canary_sub = evolve_canary_p.add_subparsers(
+        dest="canary_command", required=True, metavar="subcommand"
+    )
+    evolve_canary_capture_p = evolve_canary_sub.add_parser(
+        "capture",
+        help="Snapshot SBER/LKOH/IZNM and write data/canary_baseline.json.",
+    )
+    evolve_canary_capture_p.set_defaults(func=_cmd_evolve_canary_capture)
+
+    evolve_memory_p = evolve_sub.add_parser(
+        "memory", help="Inspect or maintain evolution/MEMORY.md."
+    )
+    evolve_memory_sub = evolve_memory_p.add_subparsers(
+        dest="memory_command", required=True, metavar="subcommand"
+    )
+    evolve_memory_show_p = evolve_memory_sub.add_parser(
+        "show", help="Print evolution/MEMORY.md to stdout."
+    )
+    evolve_memory_show_p.set_defaults(func=_cmd_evolve_memory_show)
+    evolve_memory_verify_p = evolve_memory_sub.add_parser(
+        "verify",
+        help="Cross-check MEMORY.md against the working tree (stale entries).",
+    )
+    evolve_memory_verify_p.set_defaults(func=_cmd_evolve_memory_verify)
 
     return parser
 
@@ -937,16 +978,182 @@ def _cmd_auth_google_drive(args: argparse.Namespace) -> int:
 
 
 def _cmd_evolve_tick(args: argparse.Namespace) -> int:
-    """Run one self-evolution tick (Patch 40 baseline-only flavour)."""
+    """Run one self-evolution tick."""
     settings_or_code = _load_settings_or_exit(args)
     if isinstance(settings_or_code, int):
         return settings_or_code
-    # Lazy import: keeps the evolve package out of the regular import
-    # graph for ``edx update`` invocations and avoids any import cost
-    # when the loop is not in use.
     from edx.evolve.tick import run_one_tick
 
     run_one_tick(settings_or_code)
+    return EXIT_OK
+
+
+def _cmd_evolve_status(args: argparse.Namespace) -> int:
+    """Print the last N evolve ticks as a compact table."""
+    settings_or_code = _load_settings_or_exit(args)
+    if isinstance(settings_or_code, int):
+        return settings_or_code
+    settings = settings_or_code
+
+    from edx.storage import Database, EvolutionRepo
+
+    db = Database(settings.app.paths.state_db)
+    db.migrate()
+    with closing(db.connect()) as conn:
+        repo = EvolutionRepo(db, conn)
+        ticks = repo.latest_ticks(limit=int(args.limit))
+    if not ticks:
+        print("(no ticks recorded yet)")
+        return EXIT_OK
+    for tick in ticks:
+        print(
+            f"#{tick.tick_id:5d} "
+            f"started={tick.started_at} "
+            f"phase={tick.phase} "
+            f"verdict={tick.verdict or '—'} "
+            f"cost=${(tick.claude_cost_usd or 0):.3f} "
+            f"turns={tick.claude_turns or 0} "
+            f"sha={tick.commit_sha or '—'}"
+        )
+        if tick.error_summary:
+            print(f"        error: {tick.error_summary}")
+    return EXIT_OK
+
+
+def _cmd_evolve_report(args: argparse.Namespace) -> int:
+    """Aggregates over the last 7 days."""
+    from datetime import UTC, datetime, timedelta
+
+    settings_or_code = _load_settings_or_exit(args)
+    if isinstance(settings_or_code, int):
+        return settings_or_code
+    settings = settings_or_code
+
+    from edx.storage import Database, EvolutionRepo
+
+    db = Database(settings.app.paths.state_db)
+    db.migrate()
+    with closing(db.connect()) as conn:
+        repo = EvolutionRepo(db, conn)
+        # Reuse latest_ticks for a generous window; trim by date below.
+        ticks = repo.latest_ticks(limit=2000)
+    cutoff = (datetime.now(UTC) - timedelta(days=7)).isoformat()
+    window = [t for t in ticks if t.started_at >= cutoff]
+    by_verdict: dict[str, int] = {}
+    cost_total = 0.0
+    cost_ok_total = 0.0
+    cost_ok_count = 0
+    for t in window:
+        v = t.verdict or "running"
+        by_verdict[v] = by_verdict.get(v, 0) + 1
+        c = t.claude_cost_usd or 0.0
+        cost_total += c
+        if t.verdict == "ok":
+            cost_ok_total += c
+            cost_ok_count += 1
+
+    print(f"Evolve report — last 7 days ({len(window)} ticks)")
+    for verdict, count in sorted(by_verdict.items()):
+        print(f"  {verdict:20s} {count}")
+    print(f"  cost total:  ${cost_total:.2f}")
+    if cost_ok_count:
+        print(f"  cost / ok:   ${cost_ok_total / cost_ok_count:.3f}")
+
+    with closing(db.connect()) as conn:
+        skip = EvolutionRepo(db, conn).get_skiplist()
+    print(f"Skiplist size: {len(skip)}")
+    by_reason: dict[str, int] = {}
+    for entry in skip:
+        by_reason[entry.reason] = by_reason.get(entry.reason, 0) + 1
+    for reason, count in sorted(by_reason.items()):
+        print(f"  {reason:20s} {count}")
+    return EXIT_OK
+
+
+def _cmd_evolve_reset(args: argparse.Namespace) -> int:
+    settings_or_code = _load_settings_or_exit(args)
+    if isinstance(settings_or_code, int):
+        return settings_or_code
+    settings = settings_or_code
+    from edx.storage import Database, EvolutionRepo
+
+    db = Database(settings.app.paths.state_db)
+    db.migrate()
+    with closing(db.connect()) as conn:
+        repo = EvolutionRepo(db, conn)
+        ok = repo.reset(args.company_id)
+    print("removed" if ok else "no entry to remove")
+    return EXIT_OK
+
+
+def _cmd_evolve_canary_capture(args: argparse.Namespace) -> int:
+    """Snapshot canaries to data/canary_baseline.json."""
+    settings_or_code = _load_settings_or_exit(args)
+    if isinstance(settings_or_code, int):
+        return settings_or_code
+    settings = settings_or_code
+
+    from edx.evolve import canaries
+    from edx.storage import Database
+
+    db = Database(settings.app.paths.state_db)
+    db.migrate()
+    target = canaries.canary_baseline_path(settings.app.paths.state_db)
+    with closing(db.connect()) as conn:
+        snaps = canaries.take_canary_baseline(conn, target)
+    print(f"Wrote {target}")
+    for ticker, snap in snaps.items():
+        print(
+            f"  {ticker:6s} publications={snap.publications_total} "
+            f"metrics={snap.metrics_rows} "
+            f"written={snap.publications_by_status.get('written', 0)}"
+        )
+    return EXIT_OK
+
+
+def _cmd_evolve_memory_show(args: argparse.Namespace) -> int:
+    from edx.evolve import memory as memory_module
+
+    if not memory_module.MEMORY_PATH.exists():
+        print(f"(missing) {memory_module.MEMORY_PATH}")
+        return EXIT_OK
+    print(memory_module.MEMORY_PATH.read_text(encoding="utf-8"))
+    return EXIT_OK
+
+
+def _cmd_evolve_memory_verify(args: argparse.Namespace) -> int:
+    """Best-effort sanity check of MEMORY.md against the working tree.
+
+    For each ``- **Files touched:** path/foo, path/bar`` line, verify
+    that the listed paths still exist. Print stale references so the
+    operator can run ``edx evolve memory compact`` if needed.
+    """
+    import re
+
+    from edx.evolve import memory as memory_module
+
+    if not memory_module.MEMORY_PATH.exists():
+        print(f"(missing) {memory_module.MEMORY_PATH}")
+        return EXIT_OK
+    text = memory_module.MEMORY_PATH.read_text(encoding="utf-8")
+    line_re = re.compile(
+        r"^\s*-\s+\*\*Files touched:\*\*\s*(?P<paths>.+)$",
+        re.MULTILINE,
+    )
+    stale: list[str] = []
+    for match in line_re.finditer(text):
+        for raw in match.group("paths").split(","):
+            path = raw.strip().strip("`").strip()
+            if not path:
+                continue
+            if not Path(path).exists():
+                stale.append(path)
+    if not stale:
+        print("memory ok — all listed paths exist")
+    else:
+        print(f"stale references ({len(stale)}):")
+        for path in stale:
+            print(f"  {path}")
     return EXIT_OK
 
 

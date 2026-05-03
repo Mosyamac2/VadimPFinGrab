@@ -16,6 +16,10 @@ from edx.evolve.canaries import (
 )
 from edx.evolve.claude_runner import ClaudeRunResult, run_agent
 from edx.evolve.csv_loader import CompanyRow, CompanyType, load_companies
+from edx.evolve.git_ops import GitMergeResult
+from edx.evolve.git_ops import abandon_branch as git_abandon_branch
+from edx.evolve.git_ops import commit_and_merge as git_commit_and_merge
+from edx.evolve.git_ops import create_tick_branch as git_create_tick_branch
 from edx.evolve.memory import (
     MEMORY_PATH,
     MemoryDigest,
@@ -42,6 +46,7 @@ __all__ = [
     "ClaudeRunResult",
     "CompanyRow",
     "CompanyType",
+    "GitMergeResult",
     "MEMORY_PATH",
     "MemoryDigest",
     "PickerInput",
@@ -57,6 +62,9 @@ __all__ = [
     "classify_failures",
     "compute_verdict",
     "diff_summary",
+    "git_abandon_branch",
+    "git_commit_and_merge",
+    "git_create_tick_branch",
     "has_new_entry_since",
     "load_companies",
     "pick_next_batch",
