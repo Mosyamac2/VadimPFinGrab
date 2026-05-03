@@ -61,3 +61,10 @@ output/*
 
 logs/*
 !logs/.gitkeep
+
+# Patch 38: self-evolution loop
+evolution/runs/*
+!evolution/runs/.gitkeep
+data/state.sqlite.tick*.bak
+.env.evolve
+config-evolve/

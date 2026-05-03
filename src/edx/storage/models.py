@@ -188,3 +188,53 @@ class QAIssueRow:
     code: str
     message: str
     created_at: str
+
+
+# Patch 38: self-evolution loop. Tick — одна итерация над батчем из 3
+# компаний из e-disclosure-companies.csv. Phase — текущая фаза тика;
+# verdict — финальный результат (None пока тик не завершён).
+EvolutionPhase = Literal[
+    "baseline", "claude_code", "verdict", "done", "failed"
+]
+EvolutionVerdict = Literal[
+    "ok",
+    "neutral",
+    "regression",
+    "regression_tests",
+    "regression_canary",
+    "fail",
+    "flaky",
+    "give_up",
+    "skipped_budget",
+]
+SkiplistReason = Literal["give_up", "manual_blacklist", "moex_overlap"]
+
+
+@dataclass(frozen=True)
+class EvolutionTickRow:
+    """One self-evolution iteration over a batch of companies."""
+
+    tick_id: int
+    started_at: str
+    finished_at: str | None
+    phase: EvolutionPhase
+    verdict: EvolutionVerdict | None
+    batch_json: str
+    snaps_before_json: str | None
+    snaps_after_json: str | None
+    verdicts_json: str | None
+    claude_session: str | None
+    claude_cost_usd: float | None
+    claude_turns: int | None
+    commit_sha: str | None
+    bundle_path: str | None
+    error_summary: str | None
+
+
+@dataclass(frozen=True)
+class EvolutionSkiplistEntry:
+    company_id: str
+    reason: SkiplistReason
+    failure_count: int
+    last_tick_id: int | None
+    updated_at: str
