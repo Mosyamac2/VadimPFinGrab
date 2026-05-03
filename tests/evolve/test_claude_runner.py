@@ -22,6 +22,7 @@ class _FakePopen:
         self,
         argv,
         cwd=None,
+        env=None,
         stdout=None,
         stderr=None,
         text=False,
@@ -30,6 +31,7 @@ class _FakePopen:
         _FakePopen.instances.append(self)
         self.argv = list(argv)
         self.cwd = cwd
+        self.env = dict(env) if env is not None else None
         self._stdout_lines: list[str] = []
         self.stdout = self  # so the runner can iterate over us
         self.terminated = False
@@ -232,6 +234,47 @@ def test_run_agent_terminates_on_max_turns(monkeypatch, tmp_path: Path) -> None:
     )
     assert res.is_error is True
     assert "max_turns exceeded" in (res.error_summary or "")
+
+
+def test_run_agent_strips_anthropic_api_key_from_child_env(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Anti-regression for production tick #56: systemd loads /opt/edx/.env
+    (with ANTHROPIC_API_KEY for the pipeline) AND /opt/edx/.env.evolve
+    (with CLAUDE_CODE_OAUTH_TOKEN for the agent). claude's auth
+    precedence puts API key ABOVE OAuth token, so the wrong creds win
+    and claude gets 403. Wrapper MUST strip ANTHROPIC_API_KEY/AUTH_TOKEN
+    from the child env before spawning claude."""
+    fake = _enable_claude(monkeypatch, tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-PIPELINE-KEY")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "bearer-token")
+    monkeypatch.setattr(cr, "_git_head", lambda _root: None)
+    monkeypatch.setattr(cr, "_collect_modified_files", lambda *_a, **_kw: ())
+
+    captured_env: dict[str, str] = {}
+
+    def _factory(argv, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal captured_env
+        captured_env = dict(kwargs.get("env") or {})
+        proc = _FakePopen(argv, **kwargs)
+        proc.feed([json.dumps({"type": "result", "total_cost_usd": 0.0}) + "\n"])
+        return proc
+
+    monkeypatch.setattr(cr.subprocess, "Popen", _factory)
+    cr.run_agent(
+        bundle_dir=tmp_path / "bundle",
+        tick_id=56,
+        project_root=tmp_path,
+        claude_executable=str(fake),
+    )
+    assert "ANTHROPIC_API_KEY" not in captured_env, (
+        "ANTHROPIC_API_KEY must be stripped from claude subprocess env"
+    )
+    assert "ANTHROPIC_AUTH_TOKEN" not in captured_env, (
+        "ANTHROPIC_AUTH_TOKEN must be stripped from claude subprocess env"
+    )
+    # Token MUST stay so claude can authenticate via Max OAuth.
+    assert captured_env.get(cr.TOKEN_ENV_VAR) == "test-token"
 
 
 def test_run_agent_argv_includes_verbose(monkeypatch, tmp_path: Path) -> None:

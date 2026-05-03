@@ -101,10 +101,23 @@ def run_agent(
     last_assistant_text = ""
     error_summary: str | None = None
 
+    # Patch fix (post-pilot): strip Anthropic API auth vars so claude
+    # falls through to CLAUDE_CODE_OAUTH_TOKEN. systemd loads BOTH
+    # /opt/edx/.env (pipeline) and /opt/edx/.env.evolve (agent) — and
+    # claude's auth precedence puts ANTHROPIC_API_KEY ABOVE
+    # CLAUDE_CODE_OAUTH_TOKEN, so the pipeline's API key wins and
+    # claude gets 403 (the key has no direct-API rights for
+    # claude-sonnet-4-6). The pipeline subprocess builds its own env
+    # downstream so this strip doesn't break it.
+    child_env = os.environ.copy()
+    for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+        child_env.pop(key, None)
+
     try:
         with subprocess.Popen(
             argv,
             cwd=str(project_root),
+            env=child_env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,

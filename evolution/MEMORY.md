@@ -22,6 +22,21 @@ _no entries yet_
 
 ## Anti-patterns
 
+- **NEVER** запускать `claude -p ...` из `claude_runner` без явной
+  фильтрации `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` из дочернего
+  env. systemd-юнит подгружает И `/opt/edx/.env` (там pipeline'овый
+  API-key для Metric Extractor) И `/opt/edx/.env.evolve` (CLAUDE_CODE_
+  OAUTH_TOKEN). У claude API-key выше OAuth в приоритете, поэтому он
+  пытается auth'иться pipeline'овым ключом и получает 403 forbidden
+  (ключ не имеет прав на direct-API claude-sonnet-4-6 если biz-аккаунт
+  не настроен). Симптом: `apiKeySource: ANTHROPIC_API_KEY` в первом
+  system-event, потом assistant-message `Failed to authenticate.
+  API Error: 403`, потом result `is_error: true`. Cost=0, turns=1,
+  caught на VPS tick #56.
+  **Why:** auth precedence в Claude Code. **How to apply:** обёртка
+  должна явно собирать env через `os.environ.copy()` и `pop`-ить
+  ANTHROPIC_*. Тест `test_run_agent_strips_anthropic_api_key_from_child_env`
+  это сторожит.
 - **NEVER** трактовать «компания в `evolution_skiplist`» как безусловное
   исключение в Picker'е. `bump_failure()` вставляет строку на первом же
   страйке (failure_count=1), но это НЕ означает give_up — give_up
