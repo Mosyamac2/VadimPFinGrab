@@ -13,16 +13,19 @@ go red because of a normal failed tick.
 from __future__ import annotations
 
 import json
+import os
 from contextlib import closing
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 import yaml
 
 from edx.config import AppSettings
 from edx.evolve import bundle as bundle_module
+from edx.evolve import claude_runner as claude_runner_module
+from edx.evolve import memory as memory_module
 from edx.evolve.csv_loader import load_companies
 from edx.evolve.picker import PickerInput, pick_next_batch
 from edx.evolve.runner import run_pipeline_on_batch
@@ -42,6 +45,26 @@ DEFAULT_MAIN_TICKERS_YAML: Final[Path] = Path("config/tickers.yaml")
 DEFAULT_EVOLVE_CONFIG_DIR: Final[Path] = Path("config-evolve")
 DEFAULT_BUNDLE_ROOT: Final[Path] = Path("evolution/runs")
 DEFAULT_PIPELINE_TIMEOUT_S: Final[int] = 30 * 60
+
+DEFAULT_TICK_BUDGET_USD: Final[float] = 2.0
+DEFAULT_DAILY_BUDGET_USD: Final[float] = 25.0
+AGENT_ENABLED_ENV: Final[str] = "EDX_EVOLVE_AGENT_ENABLED"
+TICK_BUDGET_ENV: Final[str] = "EDX_EVOLVE_TICK_BUDGET_USD"
+DAILY_BUDGET_ENV: Final[str] = "EDX_EVOLVE_DAILY_BUDGET_USD"
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _agent_enabled() -> bool:
+    return os.environ.get(AGENT_ENABLED_ENV) == "1"
 
 
 def _utc_now_iso() -> str:
@@ -194,8 +217,7 @@ def run_one_tick(
         )
 
         # Patch 41: on a non-OK overall, assemble a Diagnostic Bundle so
-        # Patch 42's agent has everything it needs. We still don't invoke
-        # the agent here — that lands in Patch 42.
+        # the agent has everything it needs.
         if overall != "ok":
             try:
                 bundle_module.assemble(
@@ -211,36 +233,146 @@ def run_one_tick(
             except Exception as exc:  # noqa: BLE001 — never break the tick
                 log.warning("evolve_bundle_assemble_failed", error=str(exc))
 
-        finished_at = _utc_now_iso()
         per_ticker_codes = {t: v.code for t, v in verdicts.items()}
-        error_summary = (
-            None
-            if overall == "ok"
-            else f"baseline overall={overall}; per-ticker={per_ticker_codes}"
-        )
-        # Patch 41: when bundle is built we transition through claude_code
-        # and land in failed (Patch 42 will swap the second update_tick
-        # for the actual agent call).
-        repo.update_tick(
-            tick_id,
-            phase="done" if overall == "ok" else "failed",
-            verdict=overall,
-            snaps_before_json=snaps_before_json,
-            snaps_after_json=snaps_after_json,
-            verdicts_json=verdicts_json,
-            bundle_path=str(bundle_dir),
-            finished_at=finished_at,
-            error_summary=error_summary,
+        common_update_kwargs: dict[str, Any] = {
+            "snaps_before_json": snaps_before_json,
+            "snaps_after_json": snaps_after_json,
+            "verdicts_json": verdicts_json,
+            "bundle_path": str(bundle_dir),
+        }
+
+        # Happy path: nothing to fix, close the tick.
+        if overall == "ok":
+            repo.update_tick(
+                tick_id,
+                phase="done",
+                verdict="ok",
+                finished_at=_utc_now_iso(),
+                **common_update_kwargs,
+            )
+            log.info(
+                "evolve_tick_finished",
+                tick_id=tick_id,
+                verdict="ok",
+                duration_seconds=run_result.duration_seconds,
+                returncode=run_result.returncode,
+                per_ticker=per_ticker_codes,
+            )
+            return tick_id
+
+        # Patch 42: on FAIL/REGRESSION optionally invoke Claude Code.
+        # The verdict gate (tests / canaries / improvement / commit) is
+        # added in Patch 43 — for now we only run the agent and record
+        # cost / session metadata so the operator can inspect dry-runs.
+        agent_enabled = _agent_enabled()
+        daily_cap = _env_float(DAILY_BUDGET_ENV, DEFAULT_DAILY_BUDGET_USD)
+        tick_cap = _env_float(TICK_BUDGET_ENV, DEFAULT_TICK_BUDGET_USD)
+
+        if not agent_enabled:
+            repo.update_tick(
+                tick_id,
+                phase="failed",
+                verdict=overall,
+                error_summary=(
+                    f"agent_disabled (set {AGENT_ENABLED_ENV}=1 to invoke); "
+                    f"baseline overall={overall}; per-ticker={per_ticker_codes}"
+                ),
+                finished_at=_utc_now_iso(),
+                **common_update_kwargs,
+            )
+            log.info(
+                "evolve_tick_finished",
+                tick_id=tick_id,
+                verdict=overall,
+                agent_enabled=False,
+                per_ticker=per_ticker_codes,
+            )
+            return tick_id
+
+        spent_today = repo.daily_cost_usd(date.today().isoformat())
+        if spent_today >= daily_cap:
+            repo.update_tick(
+                tick_id,
+                phase="failed",
+                verdict="skipped_budget",
+                error_summary=(
+                    f"daily budget reached: ${spent_today:.2f} / ${daily_cap:.2f}"
+                ),
+                finished_at=_utc_now_iso(),
+                **common_update_kwargs,
+            )
+            log.warning(
+                "evolve_tick_skipped_budget",
+                tick_id=tick_id,
+                spent_today=spent_today,
+                daily_cap=daily_cap,
+            )
+            return tick_id
+
+        repo.update_tick(tick_id, phase="claude_code")
+        memory_before = (
+            memory_module.MEMORY_PATH.read_text(encoding="utf-8")
+            if memory_module.MEMORY_PATH.exists()
+            else ""
         )
 
+        claude_res = claude_runner_module.run_agent(
+            bundle_dir=bundle_dir,
+            tick_id=tick_id,
+            project_root=Path("."),
+            budget_usd=tick_cap,
+        )
+
+        memory_after = (
+            memory_module.MEMORY_PATH.read_text(encoding="utf-8")
+            if memory_module.MEMORY_PATH.exists()
+            else ""
+        )
+        memory_updated = memory_module.has_new_entry_since(
+            memory_before, memory_after, tick_id
+        )
+
+        # In Patch 42 we still don't commit / merge — gate logic lands
+        # in Patch 43. We persist the agent metadata and fall through to
+        # phase=failed with a descriptive verdict so dry-runs are easy
+        # to audit.
+        if not claude_res.modified_files:
+            verdict_after_agent: VerdictCode = "fail"
+            agent_error = "claude_no_changes"
+        elif not memory_updated:
+            verdict_after_agent = "fail"
+            agent_error = "memory_not_updated"
+        else:
+            verdict_after_agent = "neutral"
+            agent_error = "patch42_pre_gate"
+
+        if claude_res.is_error:
+            verdict_after_agent = "fail"
+            agent_error = (
+                claude_res.error_summary or "claude_run_error"
+            )
+
+        repo.update_tick(
+            tick_id,
+            phase="failed",
+            verdict=verdict_after_agent,
+            claude_session=claude_res.session_id,
+            claude_cost_usd=claude_res.cost_usd,
+            claude_turns=claude_res.turns,
+            error_summary=agent_error,
+            finished_at=_utc_now_iso(),
+            **common_update_kwargs,
+        )
         log.info(
             "evolve_tick_finished",
             tick_id=tick_id,
-            verdict=overall,
-            duration_seconds=run_result.duration_seconds,
-            timed_out=run_result.timed_out,
-            returncode=run_result.returncode,
-            per_ticker={t: v.code for t, v in verdicts.items()},
+            verdict=verdict_after_agent,
+            agent_enabled=True,
+            agent_modified_files=len(claude_res.modified_files),
+            memory_updated=memory_updated,
+            agent_cost=claude_res.cost_usd,
+            agent_turns=claude_res.turns,
+            agent_error=agent_error,
         )
         return tick_id
 

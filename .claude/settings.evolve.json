@@ -1,0 +1,55 @@
+{
+  "_comment": "Patch 42: permissions sandbox for headless Claude Code in the self-evolve loop. Loaded by .claude/commands/edx-evolve-fix.md (allowed-tools frontmatter) and validated by tests/evolve/test_settings_evolve_schema.py. NOT used by the operator's interactive Claude Code session — that is .claude/settings.local.json.",
+
+  "permissions": {
+    "allow": [
+      "Read(./)",
+      "Glob",
+      "Grep",
+      "Edit(src/**)",
+      "Edit(config/**)",
+      "Edit(tests/**)",
+      "Edit(prompts/**)",
+      "Edit(evolution/MEMORY.md)",
+      "Write(evolution/runs/*/SUMMARY.md)",
+      "Bash(.venv/bin/python -m pytest *)",
+      "Bash(.venv/bin/python -m ruff check *)",
+      "Bash(.venv/bin/python -m mypy src)",
+      "Bash(.venv/bin/python *)",
+      "Bash(.venv/bin/edx update *)",
+      "Bash(make lint *)",
+      "Bash(make typecheck *)",
+      "Bash(make test *)",
+      "Bash(git diff *)",
+      "Bash(git status *)",
+      "Bash(git log *)"
+    ],
+    "deny": [
+      "Edit(.env*)",
+      "Write(.env*)",
+      "Edit(deploy/**)",
+      "Write(deploy/**)",
+      "Edit(.git/**)",
+      "Write(.git/**)",
+      "Edit(.claude/**)",
+      "Write(.claude/**)",
+      "Edit(evolution/runs/**)",
+      "Bash(git push *)",
+      "Bash(git reset --hard *)",
+      "Bash(git checkout *)",
+      "Bash(git branch *)",
+      "Bash(git commit *)",
+      "Bash(git rebase *)",
+      "Bash(rm -rf *)",
+      "Bash(rm /*)",
+      "Bash(curl *)",
+      "Bash(wget *)",
+      "Bash(npm *)",
+      "Bash(pip install *)",
+      "Bash(.venv/bin/pip install *)",
+      "Bash(sudo *)",
+      "WebFetch",
+      "WebSearch"
+    ]
+  }
+}

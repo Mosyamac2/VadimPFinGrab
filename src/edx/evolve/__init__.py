@@ -14,7 +14,15 @@ from edx.evolve.canaries import (
     check_canaries,
     take_canary_baseline,
 )
+from edx.evolve.claude_runner import ClaudeRunResult, run_agent
 from edx.evolve.csv_loader import CompanyRow, CompanyType, load_companies
+from edx.evolve.memory import (
+    MEMORY_PATH,
+    MemoryDigest,
+    diff_summary,
+    has_new_entry_since,
+)
+from edx.evolve.memory import read as read_memory
 from edx.evolve.picker import PickerInput, pick_next_batch
 from edx.evolve.runner import PipelineRunResult, run_pipeline_on_batch
 from edx.evolve.snapshot import TickerSnapshot, snapshot_batch, snapshot_ticker
@@ -31,8 +39,11 @@ from edx.evolve.verdict import (
 __all__ = [
     "CANARY_TICKERS",
     "CanaryReport",
+    "ClaudeRunResult",
     "CompanyRow",
     "CompanyType",
+    "MEMORY_PATH",
+    "MemoryDigest",
     "PickerInput",
     "PipelineRunResult",
     "TaxonomyCode",
@@ -45,9 +56,13 @@ __all__ = [
     "check_canaries",
     "classify_failures",
     "compute_verdict",
+    "diff_summary",
+    "has_new_entry_since",
     "load_companies",
     "pick_next_batch",
+    "read_memory",
     "read_moex_e_disclosure_ids",
+    "run_agent",
     "run_one_tick",
     "run_pipeline_on_batch",
     "snapshot_batch",
