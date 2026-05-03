@@ -78,6 +78,45 @@ def test_picker_skips_give_up(evolve_repo: EvolutionRepo) -> None:
     assert "2" not in [c.company_id for c in out]
 
 
+def test_picker_does_NOT_skip_below_give_up_threshold(
+    evolve_repo: EvolutionRepo,
+) -> None:
+    """Anti-regression for production bug: bump_failure() inserts a row
+    on the FIRST strike. Picker must keep picking until failure_count >=
+    GIVE_UP_THRESHOLD — otherwise companies are blocked permanently
+    after one fail."""
+    companies = [_company(f"{i}") for i in (1, 2, 3, 4, 5)]
+    tid = evolve_repo.create_tick(
+        started_at="2026-05-01T10:00:00+00:00", phase="baseline", batch_json="[]"
+    )
+    # Single bump — count=1, BELOW threshold.
+    evolve_repo.bump_failure("2", tid)
+    out = pick_next_batch(
+        PickerInput(companies=companies, today_iso="2026-05-03T10:00:00+00:00"),
+        evolve_repo,
+    )
+    # Company 2 is still picked (priority _PRIORITY_FAILED is highest
+    # of the non-NEVER pool — it'll come AFTER never-attempted ones).
+    assert "2" in [c.company_id for c in out]
+
+
+def test_picker_does_NOT_skip_at_failure_count_two(
+    evolve_repo: EvolutionRepo,
+) -> None:
+    """Two strikes — still NOT in skiplist territory."""
+    companies = [_company(f"{i}") for i in (1, 2, 3, 4, 5)]
+    tid = evolve_repo.create_tick(
+        started_at="2026-05-01T10:00:00+00:00", phase="baseline", batch_json="[]"
+    )
+    evolve_repo.bump_failure("2", tid)
+    evolve_repo.bump_failure("2", tid)
+    out = pick_next_batch(
+        PickerInput(companies=companies, today_iso="2026-05-03T10:00:00+00:00"),
+        evolve_repo,
+    )
+    assert "2" in [c.company_id for c in out]
+
+
 def test_picker_priority_failed_over_ok_cooldown(
     evolve_repo: EvolutionRepo,
 ) -> None:

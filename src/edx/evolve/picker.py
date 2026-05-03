@@ -25,7 +25,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Final
 
 from edx.evolve.csv_loader import CompanyRow
-from edx.storage.repositories.evolution_repo import EvolutionRepo
+from edx.storage.models import EvolutionSkiplistEntry
+from edx.storage.repositories.evolution_repo import (
+    GIVE_UP_THRESHOLD,
+    EvolutionRepo,
+)
 
 DEFAULT_BATCH_SIZE: Final[int] = 3
 DEFAULT_COOLDOWN_DAYS: Final[int] = 7
@@ -75,7 +79,9 @@ def pick_next_batch(
             seen_ids.add(c.company_id)
             repo.add_overlap(c.company_id)
 
-    skiplist_ids = frozenset(e.company_id for e in repo.get_skiplist())
+    skiplist_by_id: dict[str, EvolutionSkiplistEntry] = {
+        e.company_id: e for e in repo.get_skiplist()
+    }
     latest = _load_latest_per_company(repo)
     today = (
         datetime.fromisoformat(inp.today_iso)
@@ -88,7 +94,7 @@ def pick_next_batch(
     for company in inp.companies:
         priority = _priority_for(
             company,
-            skiplist_ids=skiplist_ids,
+            skiplist_by_id=skiplist_by_id,
             latest=latest.get(company.company_id),
             cooldown_threshold=cooldown_threshold,
         )
@@ -104,12 +110,28 @@ def pick_next_batch(
 def _priority_for(
     company: CompanyRow,
     *,
-    skiplist_ids: frozenset[str],
+    skiplist_by_id: dict[str, EvolutionSkiplistEntry],
     latest: _LatestForCompany | None,
     cooldown_threshold: datetime,
 ) -> int:
-    if company.company_id in skiplist_ids:
-        return _PRIORITY_EXCLUDED
+    # Patch fix (post-pilot): skiplist exclusion is honoured ONLY when:
+    #   - reason ∈ {moex_overlap, manual_blacklist} (always exclude); OR
+    #   - reason == 'give_up' AND failure_count >= GIVE_UP_THRESHOLD.
+    # Earlier behaviour treated *any* skiplist row as exclusion, which
+    # turned the very first failure into a permanent block (bump_failure
+    # inserts on strike #1). Without this guard, no company ever reaches
+    # the 3-strike give_up threshold.
+    skip_entry = skiplist_by_id.get(company.company_id)
+    if skip_entry is not None:
+        if skip_entry.reason in ("manual_blacklist", "moex_overlap"):
+            return _PRIORITY_EXCLUDED
+        if (
+            skip_entry.reason == "give_up"
+            and skip_entry.failure_count >= GIVE_UP_THRESHOLD
+        ):
+            return _PRIORITY_EXCLUDED
+        # Below the give-up threshold — fall through; verdict-based
+        # routing below sends it to _PRIORITY_FAILED naturally.
 
     if latest is None or latest.verdict is None:
         return _PRIORITY_NEVER

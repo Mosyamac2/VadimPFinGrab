@@ -22,6 +22,18 @@ _no entries yet_
 
 ## Anti-patterns
 
+- **NEVER** трактовать «компания в `evolution_skiplist`» как безусловное
+  исключение в Picker'е. `bump_failure()` вставляет строку на первом же
+  страйке (failure_count=1), но это НЕ означает give_up — give_up
+  наступает только при `failure_count >= GIVE_UP_THRESHOLD (=3)`. Picker
+  обязан читать `reason` И `failure_count` перед исключением. До фикса
+  словлено в проде: 53 компании заблокированы навсегда после первого же
+  fail-тика, не успев дойти до threshold.
+  **Why:** баг в `picker._priority_for` использовал `frozenset` ID-ов,
+  без учёта счётчика. **How to apply:** любая правка Picker должна
+  читать `EvolutionSkiplistEntry` целиком и применять threshold для
+  `give_up`. Тест `test_picker_does_NOT_skip_below_give_up_threshold`
+  это сторожит.
 - **NEVER** call `claude -p ... --output-format stream-json` без флага
   `--verbose`. Текущие версии Claude Code требуют `--verbose` именно
   для пары `--print + stream-json`; без него binary стартует и сразу
