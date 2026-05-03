@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
-DEFAULT_TIMEOUT_S: Final[int] = 30 * 60
+DEFAULT_TIMEOUT_S: Final[int] = 2 * 60 * 60
 DEFAULT_BUDGET_USD: Final[float] = 100.0
 TOKEN_ENV_VAR: Final[str] = "CLAUDE_CODE_OAUTH_TOKEN"
 MAX_TURNS_ENV_VAR: Final[str] = "EDX_EVOLVE_MAX_TURNS"
