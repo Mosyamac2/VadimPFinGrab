@@ -30,11 +30,12 @@ MAX_TURNS_ENV_VAR: Final[str] = "EDX_EVOLVE_MAX_TURNS"
 def _default_max_turns() -> int:
     """Resolve max-turns budget. Operator can override via
     ``EDX_EVOLVE_MAX_TURNS`` in ``/opt/edx/.env.evolve``; otherwise we
-    default to 100. Earlier defaults of 25 / 60 were too tight: on Max
-    subscription USD cost is informational (the operator pays via
-    subscription, not API), so the right knob is turns, not dollars.
-    A typical fix tick legitimately spends 30-80 turns; 100 gives
-    headroom for harder cases without preempting useful work.
+    default to 1000 — effectively unbounded for the operator's Max
+    subscription where USD cost is informational (billed via
+    subscription quota, not API). The right knob is turns, not dollars,
+    and on Max we want to let the agent finish its work rather than
+    preempt it. The wall-clock timeout (DEFAULT_TIMEOUT_S) and
+    claude's own reasoning quality remain the practical bounds.
     """
     raw = os.environ.get(MAX_TURNS_ENV_VAR)
     if raw:
@@ -44,7 +45,7 @@ def _default_max_turns() -> int:
                 return value
         except ValueError:
             pass
-    return 100
+    return 1000
 
 
 DEFAULT_MAX_TURNS: Final[int] = _default_max_turns()
