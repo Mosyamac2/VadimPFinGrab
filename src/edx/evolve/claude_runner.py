@@ -23,8 +23,32 @@ from typing import Any, Final
 
 DEFAULT_TIMEOUT_S: Final[int] = 30 * 60
 DEFAULT_BUDGET_USD: Final[float] = 2.0
-DEFAULT_MAX_TURNS: Final[int] = 25
 TOKEN_ENV_VAR: Final[str] = "CLAUDE_CODE_OAUTH_TOKEN"
+MAX_TURNS_ENV_VAR: Final[str] = "EDX_EVOLVE_MAX_TURNS"
+
+
+def _default_max_turns() -> int:
+    """Resolve max-turns budget. Operator can override via
+    ``EDX_EVOLVE_MAX_TURNS`` in ``/opt/edx/.env.evolve``; otherwise we
+    default to 60. The pre-pilot value of 25 was set when STEP 0 was
+    smaller and turns out to be too tight for real agent work — a
+    typical fix tick legitimately spends ~40-50 turns (read bundle,
+    plan, edit, run tests, debug pre-existing failures it stumbles
+    into, write SUMMARY + MEMORY entry, commit). Caught on tick #71:
+    31 unique-id turns of real productive work, killed by the wrapper.
+    """
+    raw = os.environ.get(MAX_TURNS_ENV_VAR)
+    if raw:
+        try:
+            value = int(raw)
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+    return 60
+
+
+DEFAULT_MAX_TURNS: Final[int] = _default_max_turns()
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,14 +71,19 @@ def run_agent(
     tick_id: int,
     project_root: Path,
     budget_usd: float = DEFAULT_BUDGET_USD,
-    max_turns: int = DEFAULT_MAX_TURNS,
+    max_turns: int | None = None,
     timeout_seconds: int = DEFAULT_TIMEOUT_S,
     claude_executable: str | None = None,
 ) -> ClaudeRunResult:
     """Run ``claude -p`` and stream its output into ``bundle_dir/claude.jsonl``.
 
     Returns a snapshot of cost / turns / modified files after the run.
+    ``max_turns`` defaults to ``EDX_EVOLVE_MAX_TURNS`` env var (else 60),
+    re-read at every call so operator tuning takes effect on the next
+    tick without a code redeploy.
     """
+    if max_turns is None:
+        max_turns = _default_max_turns()
     bundle_dir.mkdir(parents=True, exist_ok=True)
     stream_path = bundle_dir / "claude.jsonl"
     summary_path = bundle_dir / "SUMMARY.md"
@@ -100,6 +129,12 @@ def run_agent(
     is_error = False
     last_assistant_text = ""
     error_summary: str | None = None
+    seen_message_ids: set[str] = set()
+    # The wrapper's turn guard is a safety net. Claude's own --max-turns CLI
+    # flag enforces the contract; we keep slack so claude reaches its limit
+    # first and emits a clean ``result`` event with cost and num_turns,
+    # rather than the wrapper SIGTERM-ing mid-stream and losing accounting.
+    wrapper_max_turns = max_turns + 5
 
     # Patch fix (post-pilot): strip Anthropic API auth vars so claude
     # falls through to CLAUDE_CODE_OAUTH_TOKEN. systemd loads BOTH
@@ -139,6 +174,7 @@ def run_agent(
                             session_id=session_id,
                             last_assistant_text=last_assistant_text,
                             is_error=is_error,
+                            seen_message_ids=seen_message_ids,
                         )
                     )
                     classified = _classify_result_error(parsed)
@@ -151,11 +187,11 @@ def run_agent(
                             f"budget cap exceeded: ${cost_usd:.3f} > ${budget_usd:.2f}"
                         )
                         break
-                    if turns > max_turns:
+                    if turns > wrapper_max_turns:
                         proc.terminate()
                         is_error = True
                         error_summary = (
-                            f"max_turns exceeded: {turns} > {max_turns}"
+                            f"max_turns exceeded: {turns} > {wrapper_max_turns}"
                         )
                         break
                     if (time.monotonic() - started) > timeout_seconds:
@@ -211,8 +247,18 @@ def _absorb_event(
     session_id: str | None,
     last_assistant_text: str,
     is_error: bool,
+    seen_message_ids: set[str],
 ) -> tuple[float, int, str | None, str, bool]:
-    """Pull cost / turns / session_id / last text out of a stream-json event."""
+    """Pull cost / turns / session_id / last text out of a stream-json event.
+
+    ``turns`` is incremented once per *distinct* assistant ``message.id`` —
+    NOT once per ``type=assistant`` stream event. stream-json emits the
+    same logical message multiple times as content blocks accumulate
+    (text, tool_use, more text, …), so naive event-counting inflates the
+    turn count by 2-4x and trips the wrapper's safety-net before claude
+    can finish normally. Anti-regression sentinel:
+    ``test_run_agent_counts_unique_message_ids``.
+    """
 
     event_type = event.get("type")
 
@@ -235,7 +281,16 @@ def _absorb_event(
             session_id = sid
 
     elif event_type == "assistant":
-        turns += 1
+        msg = event.get("message")
+        msg_id = msg.get("id") if isinstance(msg, dict) else None
+        if isinstance(msg_id, str) and msg_id not in seen_message_ids:
+            seen_message_ids.add(msg_id)
+            turns += 1
+        elif not isinstance(msg_id, str):
+            # Defensive: a stream event without message.id shouldn't happen
+            # in practice, but if it does, count it once so we don't lose
+            # a real turn entirely.
+            turns += 1
         text = _extract_assistant_text(event)
         if text:
             last_assistant_text = text

@@ -22,6 +22,24 @@ _no entries yet_
 
 ## Anti-patterns
 
+- **NEVER** считать turns в `claude_runner._absorb_event` инкрементом
+  `turns += 1` на каждый `type=assistant` событие. stream-json эмитит
+  одно и то же логическое сообщение модели **несколько раз** (по одному
+  событию на каждый append content block: text → tool_use → text → …),
+  поэтому наивный счётчик завышает в 2–4× и wrapper SIGTERM'ит claude
+  на 9-ом реальном turn'е, не дав ему дойти до своего `--max-turns 25`.
+  Result-event с cost/num_turns при этом теряется → в `edx evolve
+  status` всегда видно `cost=$0.000`, что делает ровно противоположное
+  тому, что должна делать accounting-логика. Caught на VPS на тиках
+  #67–#70 (после фикса proxy auth): 3 подряд тика с `turns=26`, реальная
+  работа модели — 9 turn'ов. **Why:** stream-json contract — события не
+  изоморфны turn'ам, turn = unique `message.id`. **How to apply:**
+  `_absorb_event` принимает `seen_message_ids: set[str]` и инкрементит
+  только при первом появлении id. Wrapper-guard выставлен в
+  `max_turns + 5` — claude сам триггернёт `--max-turns` первым и эмитит
+  чистый `result` event. Тесты `test_run_agent_counts_unique_message_ids`
+  и `test_run_agent_terminates_on_max_turns` это сторожат.
+
 - **NEVER** забывать прокинуть `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY`
   в systemd-юнит self-evolve loop'а на хостах, где прямой egress к
   `api.anthropic.com` заблокирован. Anthropic возвращает чистый

@@ -209,6 +209,10 @@ def test_run_agent_terminates_on_budget(monkeypatch, tmp_path: Path) -> None:
 
 
 def test_run_agent_terminates_on_max_turns(monkeypatch, tmp_path: Path) -> None:
+    """The wrapper's turn guard is `max_turns + 5` (slack so claude's own
+    --max-turns enforcement fires first and emits a clean result event).
+    With max_turns=2 the wrapper guard is 7; feed 9 unique-id assistant
+    messages so we cross it and assert the guard SIGTERM's the process."""
     fake = _enable_claude(monkeypatch, tmp_path)
     monkeypatch.setattr(cr, "_git_head", lambda _root: None)
     monkeypatch.setattr(
@@ -218,8 +222,16 @@ def test_run_agent_terminates_on_max_turns(monkeypatch, tmp_path: Path) -> None:
     def _factory(argv, **kwargs):  # type: ignore[no-untyped-def]
         proc = _FakePopen(argv, **kwargs)
         proc.feed(
-            [json.dumps({"type": "assistant", "message": {"content": []}}) + "\n"]
-            * 5
+            [
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {"id": f"msg_{i:02d}", "content": []},
+                    }
+                )
+                + "\n"
+                for i in range(9)
+            ]
         )
         return proc
 
@@ -229,11 +241,129 @@ def test_run_agent_terminates_on_max_turns(monkeypatch, tmp_path: Path) -> None:
         bundle_dir=tmp_path / "bundle",
         tick_id=2,
         project_root=tmp_path,
-        max_turns=3,
+        max_turns=2,
         claude_executable=str(fake),
     )
     assert res.is_error is True
     assert "max_turns exceeded" in (res.error_summary or "")
+
+
+def test_run_agent_default_max_turns_reads_env(monkeypatch, tmp_path: Path) -> None:
+    """Operator can tune max-turns budget via EDX_EVOLVE_MAX_TURNS env var
+    (loaded by systemd from /opt/edx/.env.evolve) without touching code.
+    The default falls back to 60 — enough for real agent work after the
+    pre-pilot 25 was found too tight on tick #71."""
+    fake = _enable_claude(monkeypatch, tmp_path)
+    monkeypatch.setattr(cr, "_git_head", lambda _root: None)
+    monkeypatch.setattr(cr, "_collect_modified_files", lambda *_a, **_kw: ())
+
+    captured_argv: list[str] = []
+
+    def _factory(argv, **kwargs):  # type: ignore[no-untyped-def]
+        captured_argv.clear()
+        captured_argv.extend(argv)
+        proc = _FakePopen(argv, **kwargs)
+        proc.feed([json.dumps({"type": "result", "is_error": False}) + "\n"])
+        return proc
+
+    monkeypatch.setattr(cr.subprocess, "Popen", _factory)
+
+    # Default: env unset → 60.
+    monkeypatch.delenv(cr.MAX_TURNS_ENV_VAR, raising=False)
+    cr.run_agent(
+        bundle_dir=tmp_path / "b1",
+        tick_id=1,
+        project_root=tmp_path,
+        claude_executable=str(fake),
+    )
+    assert captured_argv[captured_argv.index("--max-turns") + 1] == "60"
+
+    # Operator override: env=120 → 120.
+    monkeypatch.setenv(cr.MAX_TURNS_ENV_VAR, "120")
+    cr.run_agent(
+        bundle_dir=tmp_path / "b2",
+        tick_id=2,
+        project_root=tmp_path,
+        claude_executable=str(fake),
+    )
+    assert captured_argv[captured_argv.index("--max-turns") + 1] == "120"
+
+    # Garbage env value → fall back to default 60.
+    monkeypatch.setenv(cr.MAX_TURNS_ENV_VAR, "not-an-int")
+    cr.run_agent(
+        bundle_dir=tmp_path / "b3",
+        tick_id=3,
+        project_root=tmp_path,
+        claude_executable=str(fake),
+    )
+    assert captured_argv[captured_argv.index("--max-turns") + 1] == "60"
+
+
+def test_run_agent_counts_unique_message_ids(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Anti-regression for production tick #70 over-counting bug. stream-json
+    emits the same logical assistant message multiple times as content
+    blocks accumulate (text -> tool_use -> text -> ...), so a naive
+    ``turns += 1`` per event inflates the count 2-4x and the wrapper
+    SIGTERM's claude before it can finish.
+
+    Setup: 8 assistant stream events, but only 3 distinct ``message.id``
+    values — that's 3 real model turns, well within max_turns=5. Wrapper
+    must NOT preempt; the run finishes cleanly."""
+    fake = _enable_claude(monkeypatch, tmp_path)
+    monkeypatch.setattr(cr, "_git_head", lambda _root: None)
+    monkeypatch.setattr(cr, "_collect_modified_files", lambda *_a, **_kw: ())
+
+    def _factory(argv, **kwargs):  # type: ignore[no-untyped-def]
+        proc = _FakePopen(argv, **kwargs)
+        proc.feed(
+            [
+                json.dumps({"type": "assistant", "message": {"id": "msg_A"}})
+                + "\n",
+                json.dumps({"type": "assistant", "message": {"id": "msg_A"}})
+                + "\n",
+                json.dumps({"type": "assistant", "message": {"id": "msg_A"}})
+                + "\n",
+                json.dumps({"type": "assistant", "message": {"id": "msg_B"}})
+                + "\n",
+                json.dumps({"type": "assistant", "message": {"id": "msg_B"}})
+                + "\n",
+                json.dumps({"type": "assistant", "message": {"id": "msg_C"}})
+                + "\n",
+                json.dumps({"type": "assistant", "message": {"id": "msg_C"}})
+                + "\n",
+                json.dumps({"type": "assistant", "message": {"id": "msg_C"}})
+                + "\n",
+                json.dumps(
+                    {
+                        "type": "result",
+                        "is_error": False,
+                        "num_turns": 3,
+                        "total_cost_usd": 0.5,
+                    }
+                )
+                + "\n",
+            ]
+        )
+        return proc
+
+    monkeypatch.setattr(cr.subprocess, "Popen", _factory)
+    res = cr.run_agent(
+        bundle_dir=tmp_path / "bundle",
+        tick_id=70,
+        project_root=tmp_path,
+        max_turns=5,
+        claude_executable=str(fake),
+    )
+    assert res.is_error is False, (
+        f"wrapper preempted despite only 3 unique message_ids; "
+        f"error_summary={res.error_summary!r}"
+    )
+    # Final turn count comes from result.num_turns (3), not stream events (8).
+    assert res.turns == 3
+    proc = _FakePopen.instances[-1]
+    assert proc.terminated is False, "wrapper SIGTERM'd unnecessarily"
 
 
 def test_run_agent_strips_anthropic_api_key_from_child_env(
