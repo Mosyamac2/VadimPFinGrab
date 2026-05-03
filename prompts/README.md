@@ -91,6 +91,31 @@
 
 **Зависимости от внешнего сайта:** к Patch 23 эта строка уже не актуальна — Playwright-бэкенд штатно обходит ServicePipe-challenge. Для тестов всё равно используются фикстуры (network-free, быстрые); live-проверка Playwright-пути остаётся ручной (см. DoD в `prompt_23`).
 
+## Серия Patch 38–46 (Self-Evolution Loop) — 🟡 запланирована
+
+Цель серии — добавить в проект функциональность **самоэволюции**: каждые 5 минут демон берёт батч из 3 компаний из `e-disclosure-companies.csv`, прогоняет на них пайплайн, на провале запускает headless Claude Code (с обязательным чтением и обновлением `evolution/MEMORY.md`) и автоматически мерджит зелёный фикс в `master`. Полный план — в [`PLAN_self_evolution.md`](../PLAN_self_evolution.md).
+
+| # | Промпт | Что приземлится | Pri | Breaking? |
+|---|---|---|---|---|
+| 38 | [DB migration + EvolutionRepo + MEMORY.md template](prompt_38_evolution_db.md) | миграция `0010_evolution.sql`, модели/репозиторий, шаблон `evolution/MEMORY.md`, `.gitignore`-допы | P0 | нет (additive) |
+| 39 | [CSV loader + Picker + Synth](prompt_39_evolution_csv_picker_synth.md) | `src/edx/evolve/{csv_loader,picker,synth}.py`; батч=3, MOEX-skip, cooldown; материализация `config-evolve/` | P0 | нет |
+| 40 | [Runner + Snapshot + Verdict + первая версия CLI tick](prompt_40_evolution_runner_snapshot_verdict.md) | `evolve/{runner,snapshot,verdict,tick}.py`, subparser `edx evolve tick` без агента (dry-run) | P0 | нет |
+| 41 | [Diagnostic Bundle + Failure Taxonomy + Canaries](prompt_41_evolution_bundle_taxonomy_canaries.md) | `evolve/{bundle,taxonomy,canaries}.py`; на FAIL bundle полностью собран | P0 | нет |
+| 42 | [Memory module + headless Claude Code runner](prompt_42_evolution_memory_and_claude_code.md) | `evolve/{memory,claude_runner}.py`; `.claude/settings.evolve.json`; slash `edx-evolve-fix.md`; feature flag | P0 | нет (агент по умолчанию off) |
+| 43 | [Verdict gate + git auto-merge в master + расширенный CLI](prompt_43_evolution_verdict_gate_git.md) | `evolve/git_ops.py`; полный gate (tests + canaries + batch + memory); `evolve status/replay/report/reset/memory show/verify/compact/canary capture` | P0 | нет (gate включается только при `EDX_EVOLVE_AGENT_ENABLED=1`) |
+| 44 | [Deploy: Claude Code install, systemd, env шаблон](prompt_44_evolution_deploy_remote_server.md) | `deploy/install_claude_code.sh`; `deploy/systemd/edx-evolve.{service,timer}`; `deploy/env.evolve.example`; раздел README | P1 | нет |
+| 45 | [Pilot — dry-run наблюдение + калибровка](prompt_45_evolution_pilot_dryrun.md) | процедурный патч: 30 dry-run + 5 agent-on тиков, taxonomy/budget/timeout tweaks | P1 | нет |
+| 46 | [Production rollout + monitoring + runbook](prompt_46_evolution_production_rollout.md) | `EDX_EVOLVE_AGENT_ENABLED=1` на проде; `edx evolve cleanup`; `slo-smoke` make-target; final operator runbook | P1 | нет |
+
+**Зависимости внутри серии:** строго последовательны. Patch 38–43 безопасны к merge даже без планируемого Patch 46 (агент off по умолчанию). Patch 44 — операционный (только deploy-файлы и docs). Patch 45 — pilot, не код. Patch 46 — финальное включение + cleanup-инструменты.
+
+**Решения, согласованные с оператором (2026-05-03):**
+- auto-merge в `master` после прохождения 4-уровневого gate (без PR-review);
+- дневной бюджет $25, per-tick $2;
+- профиль `bank|non_bank` берётся из колонки `type` в `e-disclosure-companies.csv`;
+- размер батча — 3 компании на тик (для обобщения и anti-regression внутри батча);
+- долгосрочная память `evolution/MEMORY.md` обязательна — Claude Code должен её прочесть в STEP 0 и обновить в STEP 4 каждого тика, иначе тик считается failed.
+
 ## Соглашения
 
 - Каждый промпт приводит ссылку на разделы ТЗ, к которым он относится.
