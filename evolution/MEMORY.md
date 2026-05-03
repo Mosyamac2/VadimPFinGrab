@@ -22,6 +22,17 @@ _no entries yet_
 
 ## Anti-patterns
 
+- **NEVER** call `claude -p ... --output-format stream-json` без флага
+  `--verbose`. Текущие версии Claude Code требуют `--verbose` именно
+  для пары `--print + stream-json`; без него binary стартует и сразу
+  падает в stderr с `Error: When using --print, --output-format=
+  stream-json requires --verbose`, exit=1, claude.jsonl пуст, cost=0.
+  Каждый live-тик гарантированно проваливается.
+  **Why:** разрабатывалось до пилота, словлено на VPS на tick #9
+  (EDX16103/EDX16156/EDX16486) — все три ушли в skiplist на ровном
+  месте. **How to apply:** любая правка argv в `claude_runner.py`
+  должна сохранять `--verbose`. Тест
+  `test_claude_runner_argv_includes_verbose` это сторожит.
 - **NEVER** treat `state_slice.documents` as authoritative when the log
   file shows ticker-specific events (`discoverer_non_200`, `metric_extract_failed`).
   In `evolve/taxonomy.py` we filter log-lines by `ticker` field and DO NOT

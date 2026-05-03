@@ -80,6 +80,11 @@ def run_agent(
         f"/edx-evolve-fix {tick_id}",
         "--output-format",
         "stream-json",
+        # ``--print --output-format=stream-json`` requires ``--verbose``
+        # in current Claude Code versions; without it the binary refuses
+        # to start with a hard error to stderr (caught in pilot, all
+        # live ticks pre-fix exited with code 1 / cost=0).
+        "--verbose",
         "--max-turns",
         str(max_turns),
         "--permission-mode",

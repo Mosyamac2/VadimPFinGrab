@@ -234,6 +234,35 @@ def test_run_agent_terminates_on_max_turns(monkeypatch, tmp_path: Path) -> None:
     assert "max_turns exceeded" in (res.error_summary or "")
 
 
+def test_run_agent_argv_includes_verbose(monkeypatch, tmp_path: Path) -> None:
+    """Anti-regression: stream-json + --print needs --verbose, otherwise
+    Claude Code refuses to start with exit=1. Caught in production pilot
+    on tick #9. Don't remove --verbose from claude_runner.argv."""
+    fake = _enable_claude(monkeypatch, tmp_path)
+    monkeypatch.setattr(cr, "_git_head", lambda _root: None)
+    monkeypatch.setattr(cr, "_collect_modified_files", lambda *_a, **_kw: ())
+
+    captured_argv: list[str] = []
+
+    def _factory(argv, **kwargs):  # type: ignore[no-untyped-def]
+        captured_argv.extend(argv)
+        proc = _FakePopen(argv, **kwargs)
+        proc.feed([json.dumps({"type": "result", "total_cost_usd": 0.0}) + "\n"])
+        return proc
+
+    monkeypatch.setattr(cr.subprocess, "Popen", _factory)
+    cr.run_agent(
+        bundle_dir=tmp_path / "bundle",
+        tick_id=99,
+        project_root=tmp_path,
+        claude_executable=str(fake),
+    )
+    assert "--verbose" in captured_argv, (
+        "argv must include --verbose when using --print + stream-json"
+    )
+    assert "stream-json" in captured_argv
+
+
 def test_run_agent_skips_malformed_lines(monkeypatch, tmp_path: Path) -> None:
     fake = _enable_claude(monkeypatch, tmp_path)
     monkeypatch.setattr(cr, "_git_head", lambda _root: None)
