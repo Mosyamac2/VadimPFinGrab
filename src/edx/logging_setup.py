@@ -15,6 +15,7 @@ import structlog
 DEFAULT_LOG_DIR: Final[Path] = Path("logs")
 DEFAULT_LOG_FILE: Final[str] = "pipeline.log"
 LOG_LEVEL_ENV: Final[str] = "EDX_LOG_LEVEL"
+LOG_FILE_ENV: Final[str] = "EDX_LOG_FILE"
 MAX_BYTES: Final[int] = 10 * 1024 * 1024
 BACKUP_COUNT: Final[int] = 5
 
@@ -26,6 +27,23 @@ def _resolve_level() -> int:
     return logging.getLevelNamesMapping().get(raw, logging.INFO)
 
 
+def _resolve_log_path(log_dir: Path | None) -> Path:
+    """Resolution order:
+
+    1. ``EDX_LOG_FILE`` env var — explicit absolute or relative path to the
+       log file (used by ``edx evolve tick`` to redirect a child pipeline's
+       output into ``evolution/runs/{tick_id}/pipeline.log``).
+    2. ``log_dir`` keyword argument — directory in which the default
+       ``pipeline.log`` is created.
+    3. Default ``logs/pipeline.log`` next to the project root.
+    """
+    env_path = os.environ.get(LOG_FILE_ENV)
+    if env_path:
+        return Path(env_path)
+    base = log_dir if log_dir is not None else DEFAULT_LOG_DIR
+    return base / DEFAULT_LOG_FILE
+
+
 def configure(log_dir: Path | None = None) -> None:
     """Configure structlog + stdlib logging.
 
@@ -33,9 +51,8 @@ def configure(log_dir: Path | None = None) -> None:
     """
     global _configured
 
-    target_dir = log_dir if log_dir is not None else DEFAULT_LOG_DIR
-    target_dir.mkdir(parents=True, exist_ok=True)
-    log_path = target_dir / DEFAULT_LOG_FILE
+    log_path = _resolve_log_path(log_dir)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
 
     level = _resolve_level()
 

@@ -260,6 +260,25 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     cache_prune_p.set_defaults(func=_cmd_cache_prune)
 
+    # Patch 40: self-evolution loop. Patches 42+ wire Claude Code; for now
+    # ``edx evolve tick`` runs the baseline pipeline on a batch of 3 and
+    # records a verdict. Operators can run it manually for debugging.
+    evolve_p = subparsers.add_parser(
+        "evolve",
+        help="Self-evolution loop subcommands (Patch 38+).",
+    )
+    evolve_sub = evolve_p.add_subparsers(
+        dest="evolve_command", required=True, metavar="subcommand"
+    )
+    evolve_tick_p = evolve_sub.add_parser(
+        "tick",
+        help=(
+            "Run one self-evolution tick over a batch of 3 companies "
+            "from e-disclosure-companies.csv. Patch 40: baseline only."
+        ),
+    )
+    evolve_tick_p.set_defaults(func=_cmd_evolve_tick)
+
     return parser
 
 
@@ -914,6 +933,20 @@ def _cmd_auth_google_drive(args: argparse.Namespace) -> int:
             "then re-run `edx replicate`."
         ),
     )
+    return EXIT_OK
+
+
+def _cmd_evolve_tick(args: argparse.Namespace) -> int:
+    """Run one self-evolution tick (Patch 40 baseline-only flavour)."""
+    settings_or_code = _load_settings_or_exit(args)
+    if isinstance(settings_or_code, int):
+        return settings_or_code
+    # Lazy import: keeps the evolve package out of the regular import
+    # graph for ``edx update`` invocations and avoids any import cost
+    # when the loop is not in use.
+    from edx.evolve.tick import run_one_tick
+
+    run_one_tick(settings_or_code)
     return EXIT_OK
 
 
