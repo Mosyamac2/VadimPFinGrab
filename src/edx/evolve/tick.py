@@ -22,6 +22,7 @@ from typing import Final
 import yaml
 
 from edx.config import AppSettings
+from edx.evolve import bundle as bundle_module
 from edx.evolve.csv_loader import load_companies
 from edx.evolve.picker import PickerInput, pick_next_batch
 from edx.evolve.runner import run_pipeline_on_batch
@@ -192,9 +193,24 @@ def run_one_tick(
             ensure_ascii=False,
         )
 
-        # In Patch 40 we do NOT invoke Claude Code yet. Tick simply
-        # records its baseline outcome and ends — bundle stays for
-        # human inspection. Patch 42 will hook the agent here.
+        # Patch 41: on a non-OK overall, assemble a Diagnostic Bundle so
+        # Patch 42's agent has everything it needs. We still don't invoke
+        # the agent here — that lands in Patch 42.
+        if overall != "ok":
+            try:
+                bundle_module.assemble(
+                    bundle_dir,
+                    batch=batch,
+                    snaps_before=snaps_before,
+                    snaps_after=snaps_after,
+                    verdicts=verdicts,
+                    log_path=log_path,
+                    state_db=settings.app.paths.state_db,
+                    conn=conn,
+                )
+            except Exception as exc:  # noqa: BLE001 — never break the tick
+                log.warning("evolve_bundle_assemble_failed", error=str(exc))
+
         finished_at = _utc_now_iso()
         per_ticker_codes = {t: v.code for t, v in verdicts.items()}
         error_summary = (
@@ -202,9 +218,12 @@ def run_one_tick(
             if overall == "ok"
             else f"baseline overall={overall}; per-ticker={per_ticker_codes}"
         )
+        # Patch 41: when bundle is built we transition through claude_code
+        # and land in failed (Patch 42 will swap the second update_tick
+        # for the actual agent call).
         repo.update_tick(
             tick_id,
-            phase="done",
+            phase="done" if overall == "ok" else "failed",
             verdict=overall,
             snaps_before_json=snaps_before_json,
             snaps_after_json=snaps_after_json,

@@ -7,11 +7,19 @@ from ``e-disclosure-companies.csv`` and (in Patch 42+) drive Claude Code
 in headless mode.
 """
 
+from edx.evolve.canaries import (
+    CANARY_TICKERS,
+    CanaryReport,
+    canary_baseline_path,
+    check_canaries,
+    take_canary_baseline,
+)
 from edx.evolve.csv_loader import CompanyRow, CompanyType, load_companies
 from edx.evolve.picker import PickerInput, pick_next_batch
 from edx.evolve.runner import PipelineRunResult, run_pipeline_on_batch
 from edx.evolve.snapshot import TickerSnapshot, snapshot_batch, snapshot_ticker
 from edx.evolve.synth import write_evolve_config
+from edx.evolve.taxonomy import TaxonomyCode, TaxonomyEntry, classify_failures
 from edx.evolve.tick import read_moex_e_disclosure_ids, run_one_tick
 from edx.evolve.verdict import (
     TickerVerdict,
@@ -21,14 +29,21 @@ from edx.evolve.verdict import (
 )
 
 __all__ = [
+    "CANARY_TICKERS",
+    "CanaryReport",
     "CompanyRow",
     "CompanyType",
     "PickerInput",
     "PipelineRunResult",
+    "TaxonomyCode",
+    "TaxonomyEntry",
     "TickerSnapshot",
     "TickerVerdict",
     "VerdictCode",
     "aggregate_verdict",
+    "canary_baseline_path",
+    "check_canaries",
+    "classify_failures",
     "compute_verdict",
     "load_companies",
     "pick_next_batch",
@@ -37,5 +52,6 @@ __all__ = [
     "run_pipeline_on_batch",
     "snapshot_batch",
     "snapshot_ticker",
+    "take_canary_baseline",
     "write_evolve_config",
 ]
