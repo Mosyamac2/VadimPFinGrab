@@ -116,8 +116,15 @@ def run_agent(
         "--verbose",
         "--max-turns",
         str(max_turns),
+        # Self-evolve runs are headless, autonomous, and supervised only
+        # post-hoc by the gate (tests + canary tickers + verdict logic).
+        # There is no human to answer permission prompts mid-tick. We
+        # therefore run with full permissions; the gate, the .claude/
+        # settings.evolve.json deny rules (where applicable), and the
+        # post-hoc git verification keep destructive blast radius bounded.
         "--permission-mode",
-        "acceptEdits",
+        "bypassPermissions",
+        "--dangerously-skip-permissions",
         "--add-dir",
         str(bundle_dir.resolve()),
     ]

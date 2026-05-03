@@ -409,6 +409,46 @@ def test_run_agent_strips_anthropic_api_key_from_child_env(
     assert captured_env.get(cr.TOKEN_ENV_VAR) == "test-token"
 
 
+def test_run_agent_argv_runs_with_full_permissions(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Self-evolve runs are headless and autonomous — no human is
+    available to answer permission prompts mid-tick. Wrapper MUST spawn
+    claude with both --permission-mode bypassPermissions AND
+    --dangerously-skip-permissions so the agent has full agency to
+    diagnose and patch without bailing out on a confirmation prompt.
+    Anti-regression for operator request post tick #73."""
+    fake = _enable_claude(monkeypatch, tmp_path)
+    monkeypatch.setattr(cr, "_git_head", lambda _root: None)
+    monkeypatch.setattr(cr, "_collect_modified_files", lambda *_a, **_kw: ())
+
+    captured_argv: list[str] = []
+
+    def _factory(argv, **kwargs):  # type: ignore[no-untyped-def]
+        captured_argv.extend(argv)
+        proc = _FakePopen(argv, **kwargs)
+        proc.feed([json.dumps({"type": "result", "is_error": False}) + "\n"])
+        return proc
+
+    monkeypatch.setattr(cr.subprocess, "Popen", _factory)
+    cr.run_agent(
+        bundle_dir=tmp_path / "bundle",
+        tick_id=99,
+        project_root=tmp_path,
+        claude_executable=str(fake),
+    )
+    assert "--permission-mode" in captured_argv
+    pm_idx = captured_argv.index("--permission-mode")
+    assert captured_argv[pm_idx + 1] == "bypassPermissions", (
+        f"expected bypassPermissions, got {captured_argv[pm_idx + 1]!r}"
+    )
+    assert "--dangerously-skip-permissions" in captured_argv, (
+        "wrapper must pass --dangerously-skip-permissions for autonomous runs"
+    )
+    # Must NOT regress to the old, prompt-on-Bash mode.
+    assert "acceptEdits" not in captured_argv
+
+
 def test_run_agent_argv_includes_verbose(monkeypatch, tmp_path: Path) -> None:
     """Anti-regression: stream-json + --print needs --verbose, otherwise
     Claude Code refuses to start with exit=1. Caught in production pilot
