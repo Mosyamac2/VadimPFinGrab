@@ -239,7 +239,62 @@ sudo systemctl enable --now edx-update.timer
 - Хранение исторических версий извлечений (только последняя успешная по
   публикации).
 
-## 11. Перспективы
+## 11. Self-Evolution loop (Patch 38–46)
+
+Опциональный фоновой режим, в котором проект сам прогоняется на ~125
+компаниях из `e-disclosure-companies.csv` и **сам же дописывает свой
+код** через headless Claude Code, когда падает на новой терминологии или
+разметке. Архитектура и инварианты — в
+[`PLAN_self_evolution.md`](PLAN_self_evolution.md). Журнал решённых
+кейсов растёт в [`evolution/MEMORY.md`](evolution/MEMORY.md).
+
+### Установка (один раз на VPS)
+
+```bash
+# 1. Node 20 + Claude Code CLI
+sudo bash deploy/install_claude_code.sh
+
+# 2. Получить refresh-token
+sudo -iu edx claude /login          # interactive один раз; токен в ~/.claude
+
+# 3. Прокинуть env
+sudo cp deploy/env.evolve.example /opt/edx/.env.evolve
+sudo chown edx:edx /opt/edx/.env.evolve
+sudo chmod 600 /opt/edx/.env.evolve
+sudo $EDITOR /opt/edx/.env.evolve   # вписать CLAUDE_CODE_OAUTH_TOKEN
+
+# 4. Канареечный baseline (один раз перед первым тиком)
+sudo -iu edx /opt/edx/.venv/bin/edx evolve canary capture
+
+# 5. Установить таймер
+sudo cp deploy/systemd/edx-evolve.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now edx-evolve.timer
+```
+
+После шага 5 каждые 5 минут запускается `edx evolve tick` в **dry-run**
+(`EDX_EVOLVE_AGENT_ENABLED=0`). Понаблюдайте `evolution/runs/` сутки;
+затем во время рабочих часов оператора:
+
+```bash
+sudo $EDITOR /opt/edx/.env.evolve     # EDX_EVOLVE_AGENT_ENABLED=1
+sudo systemctl restart edx-evolve.timer
+```
+
+С этого момента все автокоммиты идут в `master` с префиксом `evolve(N):`.
+Откат любого автокоммита: `git revert <sha>`.
+
+### Мониторинг
+
+| Команда | Что показывает |
+|---|---|
+| `edx evolve status --limit 20` | последние тики, verdict, cost, sha |
+| `edx evolve report` | агрегаты за 7 дней + skiplist |
+| `cat evolution/MEMORY.md` | live-журнал решённых проблем |
+| `journalctl -u edx-evolve.service -f` | systemd выхлоп |
+| `evolution/runs/{N}/SUMMARY.md` | per-tick отчёт агента |
+
+## 12. Перспективы
 
 Архитектурно зафиксировано (раздел 15 ТЗ):
 

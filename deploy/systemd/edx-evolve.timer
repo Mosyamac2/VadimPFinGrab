@@ -1,0 +1,20 @@
+# Patch 44: trigger edx-evolve.service every 5 minutes.
+#
+# Persistent=false intentionally — missed ticks (host offline) are NOT
+# replayed. They are cheap to drop, and replaying the backlog would
+# blow the daily $25 budget on a long outage.
+
+[Unit]
+Description=Trigger edx evolve every 5 minutes
+Requires=edx-evolve.service
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+RandomizedDelaySec=15s
+AccuracySec=15s
+Unit=edx-evolve.service
+Persistent=false
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,36 @@
+# Patch 44: self-evolve tick runner. Triggered every 5 minutes by
+# edx-evolve.timer. Serialised against itself AND against the daily
+# edx-update.service via flock on /tmp/edx-evolve.lock.
+#
+# Failures of the underlying ETL (per-company) do NOT make the
+# service unit fail — only crashes (non-zero exit + traceback) do.
+# This is intentional: systemd shouldn't go red because of a normal
+# failed tick.
+#
+# Install with:
+#   sudo cp deploy/systemd/edx-evolve.service /etc/systemd/system/
+#   sudo cp deploy/systemd/edx-evolve.timer   /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now edx-evolve.timer
+
+[Unit]
+Description=edx self-evolve tick (one batch of 3 companies)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/edx
+EnvironmentFile=-/opt/edx/.env
+EnvironmentFile=-/opt/edx/.env.evolve
+ExecStart=/usr/bin/flock -n /tmp/edx-evolve.lock /opt/edx/.venv/bin/edx evolve tick
+User=edx
+Group=edx
+TimeoutStartSec=75min
+# Allow the npm-installed claude binary on PATH.
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target
