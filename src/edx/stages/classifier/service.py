@@ -37,6 +37,10 @@ from edx.storage import (
 
 PDF_MIME_PREFIXES = ("application/pdf",)
 PDF_SUFFIXES = (".pdf",)
+# Patch 36: RTF support — Issuer Reports of small/mid-cap issuers
+# (PHOR, SLGD) come as .rtf instead of PDF.
+RTF_MIME_PREFIXES = ("application/rtf", "text/rtf")
+RTF_SUFFIXES = (".rtf",)
 
 
 @dataclass(frozen=True)
@@ -102,6 +106,31 @@ class ClassifierService:
         }
 
         for doc in documents:
+            if _is_rtf(doc):
+                # Patch 36: RTF documents are always machine-readable
+                # plain text. Reporting standard from the deterministic
+                # type_code mapping (Patch 25). page_count=1 because
+                # RTF doesn't carry reliable page boundaries; the Metric
+                # Extractor concatenates the synthetic single page with
+                # neighbours regardless.
+                rtf_standard = (
+                    reporting_standard_for_type_code(pub.report_type_code)
+                    or "OTHER"
+                )
+                self.documents_repo.update_classification(
+                    doc.document_id,
+                    reporting_standard=rtf_standard,
+                    report_form="other",
+                    is_machine_readable=True,
+                    page_count=1,
+                    pages_classification=None,
+                    text_pages_count=1,
+                    scan_pages_count=0,
+                )
+                pdf_count += 1
+                machine_readable += 1
+                standards[rtf_standard] = standards.get(rtf_standard, 0) + 1
+                continue
             if not _is_pdf(doc):
                 continue
             pdf_count += 1
@@ -229,6 +258,15 @@ def _is_pdf(doc: DocumentRow) -> bool:
     ):
         return True
     return doc.relative_path.lower().endswith(PDF_SUFFIXES)
+
+
+def _is_rtf(doc: DocumentRow) -> bool:
+    """Patch 36: RTF documents come from a few mid-cap issuers."""
+    if doc.mime_type and any(
+        doc.mime_type.startswith(prefix) for prefix in RTF_MIME_PREFIXES
+    ):
+        return True
+    return doc.relative_path.lower().endswith(RTF_SUFFIXES)
 
 
 def _serialize_pages(pages: list[PageClassification]) -> str:

@@ -731,7 +731,13 @@ async def test_ifrs_source_does_not_inject_rsbu_hint(
 
 
 def _issuer_text_extract() -> dict[str, Any]:
-    """Synthetic Issuer Report-shaped text payload with a real section 1.4."""
+    """Synthetic Issuer Report-shaped text payload with a real section 1.4.
+
+    Patch 35: TOC and real heading are separated by a realistic ~5k-char
+    block (a stand-in for sections 1.1-1.3) so the close-matches
+    safeguard doesn't bail. Real Issuer Reports always have many KB
+    between TOC and the section-1.4 heading.
+    """
     return {
         "extraction_method": "native",
         "extracted_at": "2026-01-01T00:00:00+00:00",
@@ -745,11 +751,22 @@ def _issuer_text_extract() -> dict[str, Any]:
                 ),
             },
             {
+                "page_number": 5,
+                "text": (
+                    "1.1 Сведения о Компании.\n"
+                    + "Эмитент осуществляет деятельность с 2015 года. " * 100
+                ),
+            },
+            {
                 "page_number": 10,
                 "text": (
                     "1.4. Основные финансовые показатели\n"
                     "1.4.1 Чистый процентный доход — 1 309 млрд руб.\n"
                     "1.4.2 Чистый комиссионный доход — 269 млрд руб.\n"
+                    "1.4.3 Чистая прибыль — 411 млрд руб.\n"
+                    "1.4.4 Активы — 56 324 млрд руб.\n"
+                    "1.4.5 Капитал — 7 102 млрд руб.\n"
+                    + "Пояснения и комментарии. " * 30
                 ),
             },
             {

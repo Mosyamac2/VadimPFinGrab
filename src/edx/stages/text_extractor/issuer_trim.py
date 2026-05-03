@@ -83,12 +83,34 @@ ANCHOR_END_SECTION_2 = re.compile(
 )
 
 
-def extract_section_1_4(text: str, *, max_chars: int) -> SectionExtract:
+def extract_section_1_4(
+    text: str,
+    *,
+    max_chars: int,
+    min_section_chars: int = 500,
+    toc_distance_chars: int = 3000,
+) -> SectionExtract:
     """Cut ``text`` down to the slice that holds section 1.4.
 
     Returns the original text (clipped to ``max_chars``) when the start
     anchor isn't found, with a warning. Callers can then decide whether
     to send the trimmed slice or fall back to the full document.
+
+    Patch 35 adds two safeguards against false-positive matches on
+    small issuers' Issuer Reports (IZNM was the canonical case in
+    run-14: TOC-only mention of "1.4 Основные финансовые показатели"
+    yielded a 181-char slice that the LLM couldn't extract anything
+    from).
+
+    - ``min_section_chars`` (default 500): after slicing, if the result
+      is shorter than the threshold, return ``content=None`` with
+      ``"section_1_4_too_short"``. The Metric Extractor falls back to
+      the full document text.
+    - ``toc_distance_chars`` (default 3000): if two anchor matches sit
+      within this many characters of each other, both are treated as
+      table-of-contents mentions (TOCs typically list 1.4 once and the
+      next section 1.5 directly after). Returns ``content=None`` with
+      ``"section_1_4_only_in_toc"``.
     """
     warnings: list[str] = []
     if max_chars <= 0:
@@ -118,6 +140,21 @@ def extract_section_1_4(text: str, *, max_chars: int) -> SectionExtract:
             end_anchor_seen=None,
             warnings=warnings,
         )
+    # Patch 35: when ≥2 matches sit close together, they are almost
+    # certainly the TOC line and the immediately-following 1.5 entry —
+    # the real section heading is missing or styled differently. Bail
+    # so the caller falls back to full text.
+    if len(matches) >= 2:
+        span = matches[-1].start() - matches[0].start()
+        if span < toc_distance_chars:
+            warnings.append("section_1_4_only_in_toc")
+            return SectionExtract(
+                content=None,
+                anchor_label_seen=None,
+                end_anchor_seen=None,
+                warnings=warnings,
+            )
+
     start_match = matches[-1]
     if len(matches) > 1:
         warnings.append(
@@ -151,6 +188,19 @@ def extract_section_1_4(text: str, *, max_chars: int) -> SectionExtract:
         content = content[:max_chars]
         warnings.append(
             f"section 1.4 content exceeded max_chars={max_chars} and was truncated"
+        )
+
+    # Patch 35: a slice shorter than the meaningful-section threshold is
+    # almost certainly the TOC line by itself ("1.4 Основные финансовые
+    # показатели ... 14") rather than the real KPI block. Bail to full
+    # text rather than starve the LLM.
+    if len(content) < min_section_chars:
+        warnings.append("section_1_4_too_short")
+        return SectionExtract(
+            content=None,
+            anchor_label_seen=label_seen,
+            end_anchor_seen=end_anchor_seen,
+            warnings=warnings,
         )
 
     return SectionExtract(

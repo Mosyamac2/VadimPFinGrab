@@ -51,6 +51,11 @@ def test_load_reference_configs(tmp_path: Path) -> None:
     assert non_bank.metrics["ebitda"].only_in_sources == ["IFRS", "ISSUER"]
     assert any(et.code == "other" for et in settings.event_types.event_types)
     assert settings.llm.primary.model == "claude-sonnet-4-6"
+    # Patch 37: vision-fallback enabled by default after the run-14
+    # baseline showed 1 publication needed it. Sentinel against accidental
+    # silent revert in app.yaml.
+    assert settings.app.metric_extractor.vision_fallback_enabled is True
+    assert settings.app.metric_extractor.vision_fallback_max_pages == 8
 
 
 def test_load_missing_directory_raises(tmp_path: Path) -> None:

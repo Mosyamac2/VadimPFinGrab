@@ -21,7 +21,11 @@ import pymupdf
 
 from edx.logging_setup import get_logger
 from edx.stages.text_extractor.models import PageText, Table
-from edx.stages.text_extractor.native import extract_tables, extract_text
+from edx.stages.text_extractor.native import (
+    extract_tables,
+    extract_text,
+    extract_text_from_rtf,
+)
 from edx.stages.text_extractor.normalize import normalize_text
 from edx.stages.text_extractor.ocr.base import OCRProvider
 from edx.storage import (
@@ -105,9 +109,10 @@ class TextExtractorService:
         processed = 0
 
         for doc in documents:
-            if not _is_pdf(doc):
+            kind = _document_kind(doc)
+            if kind is None:
                 continue
-            if doc.is_machine_readable is None:
+            if kind == "pdf" and doc.is_machine_readable is None:
                 self._log.warning(
                     "text_extractor_unclassified_pdf",
                     publication_id=pub.publication_id,
@@ -125,7 +130,13 @@ class TextExtractorService:
                 )
                 continue
 
-            if doc.is_machine_readable == 1:
+            if kind == "rtf":
+                # Patch 36: RTF documents are always native text — no
+                # OCR / hybrid branches apply. Single synthetic page.
+                pages = extract_text_from_rtf(full_path)
+                method = "rtf_native"
+                native += 1
+            elif doc.is_machine_readable == 1:
                 scan_indices_0 = _scan_indices(doc)
                 if scan_indices_0:
                     pages, method = self._extract_hybrid(
@@ -352,6 +363,29 @@ def _is_pdf(doc: DocumentRow) -> bool:
     if doc.mime_type and doc.mime_type.startswith("application/pdf"):
         return True
     return doc.relative_path.lower().endswith(".pdf")
+
+
+def _is_rtf(doc: DocumentRow) -> bool:
+    """Patch 36: detect Rich Text Format documents.
+
+    Some issuers (PHOR, SLGD, …) ship Issuer Reports as `.rtf` instead
+    of PDF; we treat them as machine-readable single-page text source.
+    """
+    if doc.mime_type and (
+        doc.mime_type.startswith("application/rtf")
+        or doc.mime_type.startswith("text/rtf")
+    ):
+        return True
+    return doc.relative_path.lower().endswith(".rtf")
+
+
+def _document_kind(doc: DocumentRow) -> str | None:
+    """Return ``'pdf'``, ``'rtf'`` or ``None``. None means skip."""
+    if _is_pdf(doc):
+        return "pdf"
+    if _is_rtf(doc):
+        return "rtf"
+    return None
 
 
 def _scan_indices(doc: DocumentRow) -> list[int]:

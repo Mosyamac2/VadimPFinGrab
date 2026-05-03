@@ -94,6 +94,17 @@ text_extractor:
   # LLM dispatch; this caps the final slice so even an un-anchored
   # fallback can't blow the prompt budget.
   issuer_trim_max_chars: 30000
+  # Patch 35: when extract_section_1_4 returns a slice shorter than
+  # this, treat it as a TOC-only false-positive and fall back to the
+  # full document text. Tuned for small issuers (IZNM, etc.) whose
+  # Issuer Reports list section 1.4 in the TOC but never repeat the
+  # heading at the actual KPI block — the slice between TOC and 1.5
+  # entry would otherwise be ~100-300 chars of noise.
+  issuer_trim_min_section_chars: 500
+  # Patch 35: when the section-1.4 anchor matches twice within this
+  # many characters, both are treated as TOC mentions (TOC typically
+  # has 1.4 and 1.5 lines back-to-back ~100-200 chars apart).
+  issuer_trim_toc_distance_chars: 3000
 
 metric_extractor:
   # Patch 29: defence against Anthropic native-PDF on scanned RSBU forms.
@@ -115,16 +126,18 @@ metric_extractor:
   # bulkiest combined form set; raise only if the LLM complains the
   # section was cut mid-form.
   balance_trim_max_chars: 200000
-  # Patch 33: opt-in vision-fallback. If the first text-pass leaves a
+  # Patch 33+37: vision-fallback. If the first text-pass leaves a
   # publication below vision_fallback_threshold and the doc has scan
   # pages, retry once with Anthropic native PDF pointed at *only* the
   # scan slice (pdf_page_indices). Costs ~1500 tokens per scan page;
-  # capped by vision_fallback_max_pages. Default disabled — turn on
-  # only after Patches 29-32 land and a baseline shows residual
-  # coverage to recover.
-  vision_fallback_enabled: false
+  # capped by vision_fallback_max_pages. Patch 37 enables this by
+  # default — run-14 baseline showed 1 publication (SBER-3-1881246)
+  # at 40% coverage after Patches 29-31, and vision-fallback retry
+  # on its scan pages costs ~$0.04 per run. max_pages tightened from
+  # 12 to 8 to keep cost predictable across the whole catalogue.
+  vision_fallback_enabled: true
   vision_fallback_threshold: 0.5
-  vision_fallback_max_pages: 12
+  vision_fallback_max_pages: 8
   # Patch 34: kill switch for the per-ticker full-vision path. When true,
   # the tickers.use_vision_extraction flag is ignored and every ticker
   # goes through the standard text/PDF routing. Useful as an emergency

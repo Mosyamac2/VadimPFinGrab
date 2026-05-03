@@ -77,6 +77,18 @@
 
 **Зависимости внутри серии:** Patch 30/31/32 — независимы, можно параллельно. Patch 29 — обязательная предпосылка для Patch 30/33/34 (без неё RSBU вообще не доходит до text-path). Patch 33 — должен идти после 30+31, иначе будет fallback'иться даже на дешёвых случаях. Patch 34 — после 33; рассматривается только если оставшиеся проблемные эмитенты после P0–P2 ≥ 1.
 
+## Серия Patch 35–37 (long-tail после расширения тикерного списка) — 🟡 in flight
+
+После масштабирования с 5 до 6 тикеров (добавлены IZNM, PHOR, SLGD) run_id=14 показал три остаточных класса проблем: (1) issuer_trim возвращает 181-байт slice для малых эмитентов с TOC-only ссылкой на раздел 1.4; (2) часть эмитентов выкладывают Issuer Report как `.rtf`, не PDF; (3) одна банковская РСБУ-публикация (Сбербанк МСА 805 Q1 2025, 11-page scan-only) даёт 40% coverage после Tesseract @ 400 DPI — кейс ровно для vision-fallback.
+
+| # | Промпт | Что приземлится | Pri | Breaking? |
+|---|---|---|---|---|
+| 35 | [Issuer-trim min-length validation](prompt_35_issuer_trim_min_length.md) | `extract_section_1_4` отбрасывает slice'ы < 500 chars и пары matches на расстоянии < 3000 chars (TOC-only); fall-back на полный текст | P0 | нет (доп. опциональные параметры) |
+| 36 | [RTF support](prompt_36_rtf_support.md) | `striprtf` зависимость; `extract_text_from_rtf`; Classifier и Text Extractor поддерживают `.rtf` наравне с PDF | P0 | нет (новый формат, не трогает существующий) |
+| 37 | [Enable vision_fallback by default](prompt_37_enable_vision_fallback.md) | `vision_fallback_enabled: true` в `app.yaml`, max_pages 12→8 | P1 | нет (флаг + cap; код не меняется) |
+
+**Зависимости внутри серии:** Patch 35 и 36 независимы. Patch 37 — просто включение Patch 33-инфраструктуры; зависит от 33, который уже на master. Все три независимы между собой и могут идти в любом порядке.
+
 **Зависимости от внешнего сайта:** к Patch 23 эта строка уже не актуальна — Playwright-бэкенд штатно обходит ServicePipe-challenge. Для тестов всё равно используются фикстуры (network-free, быстрые); live-проверка Playwright-пути остаётся ручной (см. DoD в `prompt_23`).
 
 ## Соглашения

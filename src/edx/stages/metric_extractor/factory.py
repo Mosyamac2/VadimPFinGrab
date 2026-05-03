@@ -28,6 +28,8 @@ def build_metric_extractor_service(
         temperature=settings.llm.temperature,
         completeness_threshold=settings.app.validator.completeness_threshold,
         issuer_trim_max_chars=settings.app.text_extractor.issuer_trim_max_chars,
+        issuer_trim_min_section_chars=settings.app.text_extractor.issuer_trim_min_section_chars,
+        issuer_trim_toc_distance_chars=settings.app.text_extractor.issuer_trim_toc_distance_chars,
         scan_ratio_threshold=settings.app.metric_extractor.scan_ratio_threshold,
         pdf_input_standards=settings.app.metric_extractor.pdf_input_standards,
         balance_trim_max_chars=settings.app.metric_extractor.balance_trim_max_chars,

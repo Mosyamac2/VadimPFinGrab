@@ -214,6 +214,14 @@ class TextExtractorConfig(BaseModel):
     # before LLM dispatch; this caps the final slice so even an
     # un-anchored fallback can't blow the prompt budget.
     issuer_trim_max_chars: int = Field(default=30_000, ge=1)
+    # Patch 35: minimum length of a section-1.4 slice for it to be
+    # considered a real KPI block. Anything shorter is treated as a
+    # TOC-only false positive and the Metric Extractor falls back to
+    # the full document text.
+    issuer_trim_min_section_chars: int = Field(default=500, ge=0)
+    # Patch 35: when two section-1.4 anchors sit within this many
+    # characters of each other, both are treated as TOC mentions.
+    issuer_trim_toc_distance_chars: int = Field(default=3000, ge=100)
 
 
 class AppConfig(BaseModel):

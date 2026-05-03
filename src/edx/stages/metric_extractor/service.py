@@ -84,6 +84,15 @@ class MetricExtractorService:
         temperature: float = 0.0,
         completeness_threshold: float = 0.5,
         issuer_trim_max_chars: int = 30_000,
+        # Patch 35: safeguards against false-positive section-1.4 anchors
+        # on small issuers' Issuer Reports. ``min_section_chars`` rejects
+        # too-short slices (likely TOC lines); ``toc_distance_chars`` flags
+        # two close anchor matches as both being TOC mentions. Either
+        # condition makes ``extract_section_1_4`` return ``content=None``,
+        # at which point ``_assemble_user_text`` falls back to the full
+        # document text.
+        issuer_trim_min_section_chars: int = 500,
+        issuer_trim_toc_distance_chars: int = 3000,
         # Patch 29: оборона от Anthropic native-PDF на сканированных формах.
         # Документы с долей scan-страниц > scan_ratio_threshold идут через
         # text-extract path, даже если is_machine_readable=1. Нативный
@@ -126,6 +135,8 @@ class MetricExtractorService:
         self.temperature = temperature
         self.completeness_threshold = completeness_threshold
         self.issuer_trim_max_chars = issuer_trim_max_chars
+        self.issuer_trim_min_section_chars = issuer_trim_min_section_chars
+        self.issuer_trim_toc_distance_chars = issuer_trim_toc_distance_chars
         self.scan_ratio_threshold = scan_ratio_threshold
         self.pdf_input_standards = tuple(pdf_input_standards)
         self.balance_trim_max_chars = balance_trim_max_chars
@@ -662,7 +673,10 @@ class MetricExtractorService:
             )
             if standard == "ISSUER":
                 trim = extract_section_1_4(
-                    doc_text, max_chars=self.issuer_trim_max_chars
+                    doc_text,
+                    max_chars=self.issuer_trim_max_chars,
+                    min_section_chars=self.issuer_trim_min_section_chars,
+                    toc_distance_chars=self.issuer_trim_toc_distance_chars,
                 )
                 for warning in trim.warnings:
                     self._log.warning(
