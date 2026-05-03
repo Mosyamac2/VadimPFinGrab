@@ -628,3 +628,95 @@ discoverer:
 - Хотите **уведомления** в Telegram/email — это вне scope первой версии
   (см. `README.md` раздел 10).
 - Нужен **REST API** или мобильное приложение — отдельный этап.
+
+---
+
+## Self-Evolve runbook (Patch 46)
+
+Если включён self-evolve loop (`README.md §11`), оператор изредка
+сталкивается с типовыми инцидентами. Ниже — отработанные сценарии
+реакции.
+
+### Incident: ежедневный budget исчерпан слишком рано
+
+Симптом: `edx evolve report` показывает `cost total ≥ 0.9 × cap`
+до 18:00 МСК.
+
+Действия:
+
+1. Найти выброс: `journalctl -u edx-evolve.service --since "today" |
+   grep cost`. Обычно один тик с `cost > $5` либо тик с `turns > 50`.
+2. Если такой тик завершился `verdict=ok` (commit прошёл) — оставить,
+   всё в порядке, просто дорогой кейс.
+3. Если тик зацикливается (повторяется на той же компании) — остановить:
+   ```bash
+   sudo $EDITOR /opt/edx/.env.evolve   # EDX_EVOLVE_AGENT_ENABLED=0
+   sudo systemctl restart edx-evolve.timer
+   ```
+   Посмотреть `evolution/runs/<N>/` и `evolution/MEMORY.md`,
+   утром следующего дня — снова `=1` после ручного фикса.
+
+### Incident: master сломан после auto-merge
+
+Симптом: `make test` упал на master после коммита `evolve(N): …`.
+
+Действия:
+
+1. Ручной revert:
+   ```bash
+   git revert <sha>
+   git push origin master
+   ```
+2. `edx evolve memory verify` — проверить, что упомянутые в MEMORY.md
+   файлы ещё на месте (revert мог удалить добавленные пути).
+3. Если найдены stale-записи — отредактировать `evolution/MEMORY.md`
+   руками (либо подождать, пока следующий тик добавит новый anti-pattern
+   через STEP 4).
+4. Опционально: завести ручной anti-pattern в раздел `## Anti-patterns`
+   с описанием инцидента, чтобы агент не повторил ошибку.
+
+### Incident: skiplist > 25% компаний
+
+Симптом: `edx evolve report` пишет skiplist size > 30 of 125.
+
+Это означает, что Claude Code не справляется с большим хвостом кейсов
+без помощи оператора. Действия:
+
+1. `cat evolution/MEMORY.md | grep -A4 "## Anti-patterns"` — может,
+   слишком жёсткие анти-паттерны блокируют валидные фиксы.
+2. Реальное решение — операторский патч (как обычные Patch 38, 41,
+   и т. п.) который обобщает решение для класса проблем.
+3. После выкатки оператор-патча:
+   ```bash
+   for cid in 1210 38588 …; do
+       edx evolve reset --company-id $cid
+   done
+   ```
+   Скиплистнутые компании снова попадают в Picker'а.
+
+### Incident: канареечная регрессия (`verdict=regression_canary`)
+
+Симптом: тик закрылся с `regression_canary`. Это значит, что какое-то
+изменение (свежий патч из master ИЛИ предыдущий evolve-коммит) сломало
+SBER/LKOH/IZNM.
+
+Действия:
+
+1. `git log --oneline -10` — найти подозрительный коммит.
+2. `edx evolve canary capture` НЕ запускать сразу — иначе закрепим
+   сломанный baseline.
+3. `git revert <sha>` если плохой коммит найден.
+4. После revert'а — `edx evolve canary capture` для актуализации.
+
+### Полный сброс при подозрении на повреждённую память/баклог
+
+Когда оператор видит, что MEMORY.md сильно вырос (>1000 строк) или
+содержит противоречия:
+
+```bash
+sudo systemctl stop edx-evolve.timer
+.venv/bin/edx evolve memory verify
+# при необходимости отредактировать evolution/MEMORY.md руками
+.venv/bin/edx evolve cleanup --older-than 30d
+sudo systemctl start edx-evolve.timer
+```

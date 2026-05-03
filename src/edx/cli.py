@@ -320,6 +320,22 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     evolve_memory_verify_p.set_defaults(func=_cmd_evolve_memory_verify)
 
+    evolve_cleanup_p = evolve_sub.add_parser(
+        "cleanup",
+        help="Remove evolution/runs/<N> bundles older than DURATION.",
+    )
+    evolve_cleanup_p.add_argument(
+        "--older-than",
+        default="30d",
+        help="Drop bundles older than DURATION (e.g. 30d, 12h). Default: 30d.",
+    )
+    evolve_cleanup_p.add_argument(
+        "--keep-failed",
+        action="store_true",
+        help="Skip bundles with verdict != 'ok' (forensic preservation).",
+    )
+    evolve_cleanup_p.set_defaults(func=_cmd_evolve_cleanup)
+
     return parser
 
 
@@ -1118,6 +1134,34 @@ def _cmd_evolve_memory_show(args: argparse.Namespace) -> int:
         print(f"(missing) {memory_module.MEMORY_PATH}")
         return EXIT_OK
     print(memory_module.MEMORY_PATH.read_text(encoding="utf-8"))
+    return EXIT_OK
+
+
+def _cmd_evolve_cleanup(args: argparse.Namespace) -> int:
+    settings_or_code = _load_settings_or_exit(args)
+    if isinstance(settings_or_code, int):
+        return settings_or_code
+    settings = settings_or_code
+
+    from edx.evolve.cleanup import parse_duration, purge_old_runs
+    from edx.storage import Database, EvolutionRepo
+
+    duration = parse_duration(args.older_than)
+    db = Database(settings.app.paths.state_db)
+    db.migrate()
+    runs_dir = Path("evolution/runs")
+    with closing(db.connect()) as conn:
+        repo = EvolutionRepo(db, conn)
+        result = purge_old_runs(
+            runs_dir,
+            repo=repo,
+            older_than=duration,
+            keep_failed=args.keep_failed,
+        )
+    print(
+        f"removed={result.removed}  kept={result.kept}  "
+        f"freed={result.removed_bytes / 1024 / 1024:.1f} MB"
+    )
     return EXIT_OK
 
 

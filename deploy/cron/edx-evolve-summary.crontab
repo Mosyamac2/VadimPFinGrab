@@ -1,0 +1,9 @@
+# Patch 46: morning summary of overnight evolve activity.
+# `edx evolve report` is captured to a daily log; operator pipes it to
+# email / Telegram / Slack via their own automation.
+#
+# Install with:
+#   crontab -u edx /opt/edx/deploy/cron/edx-evolve-summary.crontab
+
+# m  h  dom mon dow  command
+0    8  *   *   *    /usr/bin/env -i HOME=$HOME PATH=/usr/local/bin:/usr/bin:/bin /opt/edx/.venv/bin/edx evolve report > /opt/edx/logs/evolve-summary-$(date +\%F).log 2>&1
