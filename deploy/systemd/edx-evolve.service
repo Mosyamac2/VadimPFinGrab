@@ -23,6 +23,12 @@ Type=oneshot
 WorkingDirectory=/opt/edx
 EnvironmentFile=-/opt/edx/.env
 EnvironmentFile=-/opt/edx/.env.evolve
+# Proxy env for hosts where direct egress to api.anthropic.com is blocked
+# (Anthropic returns 403 "Request not allowed" for direct requests from
+# such regions). systemd does NOT source ~/.bashrc, so proxy vars set
+# there never reach the agent subprocess. Operator owns this file:
+# /opt/edx/.env.proxy (chmod 600), with HTTPS_PROXY/HTTP_PROXY/NO_PROXY.
+EnvironmentFile=-/opt/edx/.env.proxy
 ExecStart=/usr/bin/flock -n /tmp/edx-evolve.lock /opt/edx/.venv/bin/edx evolve tick
 User=edx
 Group=edx

@@ -67,4 +67,5 @@ evolution/runs/*
 !evolution/runs/.gitkeep
 data/state.sqlite.tick*.bak
 .env.evolve
+.env.proxy
 config-evolve/

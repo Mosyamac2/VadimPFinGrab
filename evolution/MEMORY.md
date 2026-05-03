@@ -22,6 +22,25 @@ _no entries yet_
 
 ## Anti-patterns
 
+- **NEVER** забывать прокинуть `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY`
+  в systemd-юнит self-evolve loop'а на хостах, где прямой egress к
+  `api.anthropic.com` заблокирован. Anthropic возвращает чистый
+  `403 forbidden / "Request not allowed"` в `result.api_error_status`,
+  cost=0, turns=1, `apiKeySource: "none"` в первом system-event'е —
+  выглядит ИДЕНТИЧНО auth-precedence-багу из tick #56, но root cause
+  совершенно другой: запрос успешно дошёл до Anthropic, но в обход
+  прокси и был геоблокирован. systemd НЕ читает `~/.bashrc` оператора,
+  поэтому `export HTTPS_PROXY=...` оттуда не наследуется. Caught на
+  VPS на тиках #54–#61: 8 подряд провалов после фикса с env-strip.
+  **Why:** systemd unit env hygiene + Anthropic geo-policy.
+  **How to apply:** `deploy/systemd/edx-evolve.service` обязан грузить
+  `EnvironmentFile=-/opt/edx/.env.proxy` (опциональный, через `-`),
+  оператор кладёт туда proxy-vars chmod 600. Wrapper в
+  `claude_runner._classify_result_error` различает 403 как
+  `auth_failed_403`, чтобы повтор бага был мгновенно виден в
+  `edx evolve status`. Тест
+  `test_run_agent_classifies_403_as_auth_failed` это сторожит.
+
 - **NEVER** запускать `claude -p ...` из `claude_runner` без явной
   фильтрации `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` из дочернего
   env. systemd-юнит подгружает И `/opt/edx/.env` (там pipeline'овый

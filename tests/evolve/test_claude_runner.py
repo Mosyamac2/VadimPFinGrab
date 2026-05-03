@@ -306,6 +306,56 @@ def test_run_agent_argv_includes_verbose(monkeypatch, tmp_path: Path) -> None:
     assert "stream-json" in captured_argv
 
 
+def test_run_agent_classifies_403_as_auth_failed(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Anti-regression for production tick #61: when claude reaches Anthropic
+    but the API rejects with 403 (typical cause on this VPS: missing
+    HTTPS_PROXY in the systemd unit's child env), the wrapper must
+    surface a precise ``auth_failed_403`` error_summary instead of the
+    generic ``claude_run_error`` so the operator sees the real signal in
+    ``edx evolve status`` without grepping claude.jsonl."""
+    fake = _enable_claude(monkeypatch, tmp_path)
+    monkeypatch.setattr(cr, "_git_head", lambda _root: None)
+    monkeypatch.setattr(cr, "_collect_modified_files", lambda *_a, **_kw: ())
+
+    def _factory(argv, **kwargs):  # type: ignore[no-untyped-def]
+        proc = _FakePopen(argv, **kwargs)
+        proc.feed(
+            [
+                json.dumps(
+                    {
+                        "type": "result",
+                        "subtype": "success",
+                        "is_error": True,
+                        "api_error_status": 403,
+                        "num_turns": 1,
+                        "total_cost_usd": 0,
+                        "result": (
+                            'Failed to authenticate. API Error: 403 '
+                            '{"error":{"type":"forbidden",'
+                            '"message":"Request not allowed"}}'
+                        ),
+                    }
+                )
+                + "\n",
+            ]
+        )
+        return proc
+
+    monkeypatch.setattr(cr.subprocess, "Popen", _factory)
+    res = cr.run_agent(
+        bundle_dir=tmp_path / "bundle",
+        tick_id=61,
+        project_root=tmp_path,
+        claude_executable=str(fake),
+    )
+    assert res.is_error is True
+    assert res.error_summary == "auth_failed_403", (
+        f"expected auth_failed_403, got: {res.error_summary!r}"
+    )
+
+
 def test_run_agent_skips_malformed_lines(monkeypatch, tmp_path: Path) -> None:
     fake = _enable_claude(monkeypatch, tmp_path)
     monkeypatch.setattr(cr, "_git_head", lambda _root: None)

@@ -141,6 +141,9 @@ def run_agent(
                             is_error=is_error,
                         )
                     )
+                    classified = _classify_result_error(parsed)
+                    if classified is not None and error_summary is None:
+                        error_summary = classified
                     if cost_usd > budget_usd:
                         proc.terminate()
                         is_error = True
@@ -238,6 +241,29 @@ def _absorb_event(
             last_assistant_text = text
 
     return cost_usd, turns, session_id, last_assistant_text, is_error
+
+
+def _classify_result_error(event: dict[str, Any]) -> str | None:
+    """Map a stream-json ``result`` event into a precise error_summary.
+
+    Returns ``None`` for non-error or unrecognised shapes; the caller falls
+    back to the generic ``claude_run_error`` produced by the orchestrator.
+    """
+    if event.get("type") != "result" or event.get("is_error") is not True:
+        return None
+    status = event.get("api_error_status")
+    if isinstance(status, int) and status == 403:
+        # Distinct from auth-precedence failures: the request reached
+        # Anthropic but was refused. On this VPS the usual cause is the
+        # systemd unit not propagating HTTPS_PROXY to the agent
+        # subprocess, so direct egress to api.anthropic.com is blocked.
+        return "auth_failed_403"
+    if isinstance(status, int):
+        return f"api_error_{status}"
+    subtype = event.get("subtype")
+    if subtype == "error_max_turns":
+        return "agent_max_turns"
+    return None
 
 
 def _extract_assistant_text(event: dict[str, Any]) -> str:
