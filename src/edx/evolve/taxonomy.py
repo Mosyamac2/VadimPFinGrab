@@ -78,8 +78,20 @@ _HINTS: Final[dict[TaxonomyCode, str]] = {
         "See pipeline.log.errors for the traceback."
     ),
     "unknown": (
-        "No matching pattern found. Inspect bundle artefacts manually "
-        "and escalate."
+        "No pre-computed pattern matched — but you have full agency to "
+        "diagnose. Do NOT escalate; this is exactly the case the loop "
+        "exists for. Investigation kit (all in evolution/runs/<tick>/): "
+        "(1) pipeline.log — full structured JSON event stream, grep by "
+        "ticker; (2) pipeline.log.errors — pre-filtered error/exception "
+        "lines; (3) state-slice.json — DB rows for the 3 tickers "
+        "(publications/documents/metrics/qa_issues); (4) snap_before/"
+        "snap_after.json — what the pipeline produced. Workflow: grep "
+        "the log for the failing ticker, identify the *first* failing "
+        "stage (discoverer/classifier/text_extractor/metric_extractor), "
+        "read the relevant src/edx/stages/ module, formulate a fix. If "
+        "the failure is a genuinely new class, ALSO add a new code + "
+        "_HINTS entry + matching branch in src/edx/evolve/taxonomy.py "
+        "_classify_one so the next occurrence has a head-start."
     ),
 }
 

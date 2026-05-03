@@ -33,6 +33,38 @@ State concisely (in your scratchpad, not as a deliverable):
 - Has this failure_class already appeared in MEMORY.md? If yes, what was
   tried before — and why didn't it solve THIS instance?
 
+## STEP 1b — When taxonomy returns `unknown` for ALL tickers
+
+If every entry in `failure_taxonomy.json` has `code: "unknown"`, that
+means the auto-classifier didn't recognise the failure. **This is NOT
+an escalation case** — it is exactly what the self-evolve loop exists
+for. Do not stop. Do not declare the problem out of scope. Diagnose
+from primary sources:
+
+1. `grep` the failing ticker(s) in `pipeline.log` (newline-delimited
+   JSON). Find the **first** event with `level=error` or `level=warning`
+   for that ticker — that is usually the originating stage.
+2. Identify the failing stage from `event=...`: e.g.
+   `discoverer_*` / `classifier_*` / `text_extract_*` / `metric_*`.
+3. Read the relevant module under `src/edx/stages/<stage>/`.
+4. Cross-check `state-slice.json` — what rows exist for the ticker?
+   Did publications get written? Documents? Metrics? Where did the
+   chain break?
+5. Form a concrete hypothesis. State it in one sentence and proceed
+   to STEP 2.
+
+If — and only if — the failure is a **genuinely new class** that we
+haven't seen before, ALSO update `src/edx/evolve/taxonomy.py`:
+
+- Add a new `TaxonomyCode` literal in the `TaxonomyCode` Union.
+- Add a `_HINTS` entry with an actionable, non-escalating description.
+- Add a detection branch in `_classify_one()` that returns the new
+  code when the matching evidence is present in the log/state-slice.
+
+Adding a new taxonomy pattern is itself a valid patch deliverable for
+this tick — the next occurrence of this failure class will have a
+head-start instead of "unknown".
+
 # STEP 2 — Fix (smallest possible change)
 
 Make the smallest code change that:
