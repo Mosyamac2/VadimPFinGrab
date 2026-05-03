@@ -192,25 +192,30 @@ def test_daily_cost_usd_ignores_unfinished(
     assert repo.daily_cost_usd("2026-05-03") == 0.0
 
 
-def test_skiplist_bump_to_give_up_clamps_at_three(
+def test_skiplist_bump_to_give_up_clamps_at_threshold(
     tmp_db: Database, conn: sqlite3.Connection
 ) -> None:
+    """Bump increments failure_count up to GIVE_UP_THRESHOLD then clamps.
+    Threshold is generous (10) so a hard pipeline failure isn't a
+    permanent ban after the first few attempts — operator request post
+    tick #73."""
+    from edx.storage.repositories.evolution_repo import GIVE_UP_THRESHOLD
+
     repo = EvolutionRepo(tmp_db, conn)
     tick_id = repo.create_tick(
         started_at="2026-05-03T10:00:00+00:00",
         phase="baseline",
         batch_json="[]",
     )
-    assert repo.bump_failure("1210", tick_id) == 1
-    assert repo.bump_failure("1210", tick_id) == 2
-    assert repo.bump_failure("1210", tick_id) == 3
+    for expected in range(1, GIVE_UP_THRESHOLD + 1):
+        assert repo.bump_failure("1210", tick_id) == expected
     # Repeated bumps after threshold are idempotent.
-    assert repo.bump_failure("1210", tick_id) == 3
-    assert repo.bump_failure("1210", tick_id) == 3
+    assert repo.bump_failure("1210", tick_id) == GIVE_UP_THRESHOLD
+    assert repo.bump_failure("1210", tick_id) == GIVE_UP_THRESHOLD
 
     entry = repo.get_skiplist_entry("1210")
     assert entry is not None
-    assert entry.failure_count == 3
+    assert entry.failure_count == GIVE_UP_THRESHOLD
     assert entry.reason == "give_up"
 
 

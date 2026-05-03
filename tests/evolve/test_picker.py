@@ -64,12 +64,14 @@ def test_picker_skips_moex_overlap_and_marks_skiplist(
 
 
 def test_picker_skips_give_up(evolve_repo: EvolutionRepo) -> None:
+    """Bump company 2 up to GIVE_UP_THRESHOLD strikes → picker excludes it."""
+    from edx.storage.repositories.evolution_repo import GIVE_UP_THRESHOLD
+
     companies = [_company(f"{i}") for i in (1, 2, 3, 4, 5)]
-    # Bump 2 three times → give_up.
     tid = evolve_repo.create_tick(
         started_at="2026-05-01T10:00:00+00:00", phase="baseline", batch_json="[]"
     )
-    for _ in range(3):
+    for _ in range(GIVE_UP_THRESHOLD):
         evolve_repo.bump_failure("2", tid)
     out = pick_next_batch(
         PickerInput(companies=companies, today_iso="2026-05-03T10:00:00+00:00"),

@@ -19,7 +19,7 @@ from edx.storage.models import (
     EvolutionVerdict,
 )
 
-GIVE_UP_THRESHOLD: Final[int] = 3
+GIVE_UP_THRESHOLD: Final[int] = 10
 
 
 class EvolutionRepo:
@@ -187,7 +187,7 @@ class EvolutionRepo:
 
         - If the company is not in the skiplist yet, insert with
           ``reason='give_up'`` and ``failure_count=1``.
-        - At ``failure_count >= GIVE_UP_THRESHOLD`` (3) the counter is
+        - At ``failure_count >= GIVE_UP_THRESHOLD`` (10) the counter is
           clamped — repeated bumps are idempotent (still ``give_up``).
 
         Returns the new ``failure_count``.

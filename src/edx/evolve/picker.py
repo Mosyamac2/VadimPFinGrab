@@ -7,7 +7,8 @@
 Приоритет (lower = higher):
   0. Never attempted — нет ни одного тика с этим company_id.
   1. Failed recoverable — последний verdict ∈ {fail, regression,
-     regression_*} И не в skiplist И failure_count < 3.
+     regression_*} И не в skiplist И failure_count < GIVE_UP_THRESHOLD
+     (10).
   2. OK с истёкшим cooldown (последний `ok` финиш > N дней назад).
 
 Excluded:
@@ -120,7 +121,7 @@ def _priority_for(
     # Earlier behaviour treated *any* skiplist row as exclusion, which
     # turned the very first failure into a permanent block (bump_failure
     # inserts on strike #1). Without this guard, no company ever reaches
-    # the 3-strike give_up threshold.
+    # the give_up threshold.
     skip_entry = skiplist_by_id.get(company.company_id)
     if skip_entry is not None:
         if skip_entry.reason in ("manual_blacklist", "moex_overlap"):
