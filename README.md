@@ -254,14 +254,19 @@ sudo systemctl enable --now edx-update.timer
 # 1. Node 20 + Claude Code CLI
 sudo bash deploy/install_claude_code.sh
 
-# 2. Получить refresh-token
-sudo -iu edx claude /login          # interactive один раз; токен в ~/.claude
+# 2. Сгенерить долгоживущий OAuth-токен под Claude.ai-подпиской
+#    (Pro/Max работают; Anthropic API key для evolve НЕ нужен).
+sudo -iu edx
+claude setup-token   # откроет браузер, попросит залогиниться
+                     # claude.ai-аккаунтом, выдаст токен sk-claude-…
+                     # (валиден ~1 год)
+exit
 
 # 3. Прокинуть env
 sudo cp deploy/env.evolve.example /opt/edx/.env.evolve
 sudo chown edx:edx /opt/edx/.env.evolve
 sudo chmod 600 /opt/edx/.env.evolve
-sudo $EDITOR /opt/edx/.env.evolve   # вписать CLAUDE_CODE_OAUTH_TOKEN
+sudo $EDITOR /opt/edx/.env.evolve   # вписать токен в CLAUDE_CODE_OAUTH_TOKEN
 
 # 4. Канареечный baseline (один раз перед первым тиком)
 sudo -iu edx /opt/edx/.venv/bin/edx evolve canary capture
@@ -272,9 +277,23 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now edx-evolve.timer
 ```
 
+> **Расход:** при `EDX_EVOLVE_AGENT_ENABLED=1` headless Claude Code
+> тратит сообщения из месячной квоты вашей Max/Pro-подписки, не
+> расходует Anthropic API биллинг. При исчерпании квоты тик
+> закрывается verdict=`fail`, master не трогается.
+
 После шага 5 каждые 5 минут запускается `edx evolve tick` в **dry-run**
-(`EDX_EVOLVE_AGENT_ENABLED=0`). Понаблюдайте `evolution/runs/` сутки;
-затем во время рабочих часов оператора:
+(`EDX_EVOLVE_AGENT_ENABLED=0`). Что это значит:
+
+- ✅ Pipeline (`edx update`) реально прогоняется на батче из 3 компаний
+  — расходует ANTHROPIC_API_KEY основного пайплайна.
+- ✅ Diagnostic Bundle складывается в `evolution/runs/<N>/`.
+- ❌ `claude -p` НЕ вызывается, ваш CLAUDE_CODE_OAUTH_TOKEN не
+  расходуется.
+- ❌ Никаких git-веток, коммитов, push'ей — master нетронут.
+
+Понаблюдайте `evolution/runs/` сутки; затем во время рабочих часов
+оператора:
 
 ```bash
 sudo $EDITOR /opt/edx/.env.evolve     # EDX_EVOLVE_AGENT_ENABLED=1
