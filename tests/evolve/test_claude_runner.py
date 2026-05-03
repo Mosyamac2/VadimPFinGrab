@@ -251,8 +251,10 @@ def test_run_agent_terminates_on_max_turns(monkeypatch, tmp_path: Path) -> None:
 def test_run_agent_default_max_turns_reads_env(monkeypatch, tmp_path: Path) -> None:
     """Operator can tune max-turns budget via EDX_EVOLVE_MAX_TURNS env var
     (loaded by systemd from /opt/edx/.env.evolve) without touching code.
-    The default falls back to 60 — enough for real agent work after the
-    pre-pilot 25 was found too tight on tick #71."""
+    The default falls back to 100 — generous headroom for real agent work
+    on Max subscription where USD cost is informational (the operator
+    pays via subscription, not API). Earlier 25 / 60 defaults were
+    found too tight on ticks #67-#71."""
     fake = _enable_claude(monkeypatch, tmp_path)
     monkeypatch.setattr(cr, "_git_head", lambda _root: None)
     monkeypatch.setattr(cr, "_collect_modified_files", lambda *_a, **_kw: ())
@@ -268,7 +270,7 @@ def test_run_agent_default_max_turns_reads_env(monkeypatch, tmp_path: Path) -> N
 
     monkeypatch.setattr(cr.subprocess, "Popen", _factory)
 
-    # Default: env unset → 60.
+    # Default: env unset → 100.
     monkeypatch.delenv(cr.MAX_TURNS_ENV_VAR, raising=False)
     cr.run_agent(
         bundle_dir=tmp_path / "b1",
@@ -276,7 +278,7 @@ def test_run_agent_default_max_turns_reads_env(monkeypatch, tmp_path: Path) -> N
         project_root=tmp_path,
         claude_executable=str(fake),
     )
-    assert captured_argv[captured_argv.index("--max-turns") + 1] == "60"
+    assert captured_argv[captured_argv.index("--max-turns") + 1] == "100"
 
     # Operator override: env=120 → 120.
     monkeypatch.setenv(cr.MAX_TURNS_ENV_VAR, "120")
@@ -288,7 +290,7 @@ def test_run_agent_default_max_turns_reads_env(monkeypatch, tmp_path: Path) -> N
     )
     assert captured_argv[captured_argv.index("--max-turns") + 1] == "120"
 
-    # Garbage env value → fall back to default 60.
+    # Garbage env value → fall back to default 100.
     monkeypatch.setenv(cr.MAX_TURNS_ENV_VAR, "not-an-int")
     cr.run_agent(
         bundle_dir=tmp_path / "b3",
@@ -296,7 +298,7 @@ def test_run_agent_default_max_turns_reads_env(monkeypatch, tmp_path: Path) -> N
         project_root=tmp_path,
         claude_executable=str(fake),
     )
-    assert captured_argv[captured_argv.index("--max-turns") + 1] == "60"
+    assert captured_argv[captured_argv.index("--max-turns") + 1] == "100"
 
 
 def test_run_agent_counts_unique_message_ids(

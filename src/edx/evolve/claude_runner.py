@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Final
 
 DEFAULT_TIMEOUT_S: Final[int] = 30 * 60
-DEFAULT_BUDGET_USD: Final[float] = 2.0
+DEFAULT_BUDGET_USD: Final[float] = 100.0
 TOKEN_ENV_VAR: Final[str] = "CLAUDE_CODE_OAUTH_TOKEN"
 MAX_TURNS_ENV_VAR: Final[str] = "EDX_EVOLVE_MAX_TURNS"
 
@@ -30,12 +30,11 @@ MAX_TURNS_ENV_VAR: Final[str] = "EDX_EVOLVE_MAX_TURNS"
 def _default_max_turns() -> int:
     """Resolve max-turns budget. Operator can override via
     ``EDX_EVOLVE_MAX_TURNS`` in ``/opt/edx/.env.evolve``; otherwise we
-    default to 60. The pre-pilot value of 25 was set when STEP 0 was
-    smaller and turns out to be too tight for real agent work — a
-    typical fix tick legitimately spends ~40-50 turns (read bundle,
-    plan, edit, run tests, debug pre-existing failures it stumbles
-    into, write SUMMARY + MEMORY entry, commit). Caught on tick #71:
-    31 unique-id turns of real productive work, killed by the wrapper.
+    default to 100. Earlier defaults of 25 / 60 were too tight: on Max
+    subscription USD cost is informational (the operator pays via
+    subscription, not API), so the right knob is turns, not dollars.
+    A typical fix tick legitimately spends 30-80 turns; 100 gives
+    headroom for harder cases without preempting useful work.
     """
     raw = os.environ.get(MAX_TURNS_ENV_VAR)
     if raw:
@@ -45,7 +44,7 @@ def _default_max_turns() -> int:
                 return value
         except ValueError:
             pass
-    return 60
+    return 100
 
 
 DEFAULT_MAX_TURNS: Final[int] = _default_max_turns()
