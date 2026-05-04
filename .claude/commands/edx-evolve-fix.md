@@ -1,11 +1,17 @@
 ---
-description: "Fix a batch of 3 e-disclosure tickers that the pipeline failed on"
+description: "Fix the batch of e-disclosure tickers that the pipeline failed on"
 argument-hint: "<tick_id>"
 allowed-tools: ["Read", "Edit", "Write", "Glob", "Grep", "Bash(.venv/bin/python *)", "Bash(.venv/bin/edx update *)", "Bash(make lint *)", "Bash(make typecheck *)", "Bash(make test *)", "Bash(git diff *)", "Bash(git status *)", "Bash(git log *)"]
 ---
 
 You are the **self-evolve agent** for the e-disclosure ETL pipeline. The
 Diagnostic Bundle for this tick lives at `evolution/runs/$1/`.
+
+The batch size is configurable (env var `EDX_EVOLVE_BATCH_SIZE`, currently
+1 in production but the wrapper supports any positive value). Treat
+`batch.json` as the authoritative list — read it and process exactly the
+companies it names, no more no less. Do not assume there are 3 companies
+or that there is a "shared root cause" across the batch.
 
 # STEP 0 — MANDATORY: read the long-term memory FIRST
 
@@ -16,20 +22,23 @@ Before ANY analysis, read these files in order:
    anti-pattern recorded here.**
 2. `evolution/runs/$1/memory_snapshot.md` — frozen copy at tick start
    (used later to verify you actually updated MEMORY.md).
-3. `evolution/runs/$1/batch.json` — the 3 companies in this tick and
-   per-company verdicts.
+3. `evolution/runs/$1/batch.json` — the companies in this tick and
+   per-company verdicts (length depends on `EDX_EVOLVE_BATCH_SIZE`).
 4. `evolution/runs/$1/failure_taxonomy.json` — auto-classified hints
    (per company) — use these as the starting hypothesis only.
 5. `evolution/runs/$1/pipeline.log.errors` — filtered errors.
-6. `evolution/runs/$1/state-slice.json` — state-slice for the 3 tickers.
+6. `evolution/runs/$1/state-slice.json` — state-slice for the batch
+   tickers.
 7. `PIPELINE_LOGIC.md` — pipeline architecture overview.
 
 # STEP 1 — Diagnose
 
 State concisely (in your scratchpad, not as a deliverable):
 
-- Which of the 3 batch companies failed? Which succeeded?
-- What is the most likely shared root cause? Or is each unique?
+- For each company in `batch.json`: did it fail or succeed?
+- What is the root cause for each failing company? Are causes shared
+  across multiple companies, or is each unique? (For batch size 1
+  there's only one company — there's no shared/unique question.)
 - Has this failure_class already appeared in MEMORY.md? If yes, what was
   tried before — and why didn't it solve THIS instance?
 
@@ -59,9 +68,9 @@ right and run this workflow per-ticker:
 6. Form a concrete hypothesis per failing ticker. State each in one
    sentence and proceed to STEP 2.
 
-Different tickers in the same batch may have different root causes —
-do not collapse them into a single "shared cause" if the evidence does
-not actually support it.
+When the batch has more than one ticker, different tickers may have
+different root causes — do not collapse them into a single "shared
+cause" if the evidence does not actually support it.
 
 If a failure turns out to be a **genuinely new class** that we haven't
 seen before, ALSO update `src/edx/evolve/taxonomy.py`:
@@ -79,8 +88,10 @@ head-start instead of "unknown".
 
 Make the smallest code change that:
 
-- Fixes ≥ 1 failing company in the batch.
-- Does NOT regress the other 2 companies in the batch.
+- Fixes ≥ 1 failing company in the batch (i.e. moves it from
+  `fail`/`regression` toward `ok`/`neutral`).
+- Does NOT regress any of the other batch companies (irrelevant when
+  batch size is 1; relevant when 2+).
 - Does NOT regress canary tickers SBER, LKOH, IZNM.
 - Does NOT introduce anti-patterns listed in MEMORY.md.
 
@@ -104,8 +115,9 @@ fix attempt:
 1. `make lint`
 2. `make typecheck`
 3. `make test`
-4. `.venv/bin/edx update --config-dir config-evolve <three --ticker
-   args from batch.json>`
+4. `.venv/bin/edx update --config-dir config-evolve` with one
+   `--ticker EDX<id>` flag per company in `batch.json` (so for the
+   default batch size of 1 you'll have a single `--ticker` flag).
 
 If a step fails, fix and re-run. If you cannot fix in ≤ 3 turns of
 working on the same step, STOP — let the wrapper rollback.
@@ -135,16 +147,21 @@ The gate enforces the regex
 section. Any deviation (empty parens, missing date, missing
 em-dash, wrong unicode dash) rolls back the entire tick.
 
-After the header, fill in the body:
+After the header, fill in the body. The number of tickers in the
+``batch [...]`` line and in the ``Coverage delta`` block must match
+the actual length of `batch.json` (1 entry by default; could be 2+
+if the operator raised `EDX_EVOLVE_BATCH_SIZE`).
 
-    - **Tick:** #$1 — batch [{ticker1}, {ticker2}, {ticker3}]
-    - **Failing companies:** {list}
-    - **Root cause:** {one paragraph}
+    - **Tick:** #$1 — batch [{ticker(s) from batch.json, comma-separated}]
+    - **Failing companies:** {subset that had verdict fail/regression}
+    - **Root cause:** {one paragraph; one sub-paragraph per distinct
+      cause if the batch had multiple}
     - **Files touched:** {paths}
     - **Tests added:** {paths or "none"}
     - **Anti-regression notes:**
       - DO NOT {specific don't-do-X items}
-    - **Coverage delta on batch:** {per-company before→after}
+    - **Coverage delta on batch:** {per-company before→after, one line
+      per ticker in the batch}
 
 If the `failure_class` is new, also add a row to the `## Index` table.
 If you discovered a new anti-pattern that is not yet recorded, add it
@@ -156,7 +173,10 @@ back and the batch is added to the skiplist.
 
 # STEP 5 — Final summary
 
-Write a short SUMMARY.md at `evolution/runs/$1/SUMMARY.md`:
+Write a short SUMMARY.md at `evolution/runs/$1/SUMMARY.md`. The list
+fields below must each contain exactly the tickers from `batch.json`
+(or be empty); together they must partition the batch — every company
+must appear in exactly one of `improved`, `neutral`, or `regressed`.
 
     # Tick #$1 summary
     - failure_class: ...
