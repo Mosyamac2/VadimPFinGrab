@@ -249,6 +249,41 @@ def commit_and_merge(
             notes=("commit_failed",),
         )
 
+    # If ``target_branch`` has moved during the tick (e.g. the operator
+    # pushed an unrelated commit to master while the agent was working),
+    # the tick branch's base is no longer master's tip and ``merge
+    # --ff-only`` below will refuse. Rebase the tick branch onto current
+    # ``target_branch`` so its commits sit directly on top — then ff-merge
+    # is trivial. If rebase fails (conflicts the agent didn't anticipate
+    # against the operator's commit), abort cleanly.
+    target_sha_before = _safe_git(
+        cwd, ["rev-parse", target_branch]
+    ).strip() or None
+    merge_base = _safe_git(
+        cwd, ["merge-base", branch, target_branch]
+    ).strip() or None
+    if (
+        target_sha_before
+        and merge_base
+        and target_sha_before != merge_base
+    ):
+        try:
+            _git_text(cwd, ["rebase", target_branch])
+            notes.append(f"rebased_onto:{target_branch}")
+            commit_sha = _git_text(
+                cwd, ["rev-parse", "HEAD"]
+            ).strip()
+        except subprocess.CalledProcessError as exc:
+            log.error("evolve_git_rebase_failed", error=str(exc))
+            _safe_git(cwd, ["rebase", "--abort"])
+            return GitMergeResult(
+                branch=branch,
+                commit_sha=commit_sha,
+                pushed=False,
+                rolled_back=False,
+                notes=("rebase_failed",),
+            )
+
     # Capture target_branch sha so we can roll back on FF failure.
     pre_target_sha = _safe_git(
         cwd, ["rev-parse", target_branch]

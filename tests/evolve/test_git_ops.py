@@ -171,6 +171,82 @@ def test_commit_and_merge_not_on_tick_branch(tmp_path: Path) -> None:
     assert any(n.startswith("not_on_tick_branch:") for n in res.notes)
 
 
+def test_commit_and_merge_rebases_when_master_moved_during_tick(
+    tmp_path: Path,
+) -> None:
+    """Anti-regression for the 'master moved mid-tick' race: the operator
+    pushes an unrelated commit to master while the agent runs. The tick
+    branch's base is no longer master's tip, so ``merge --ff-only`` would
+    refuse. ``commit_and_merge`` must rebase the tick branch onto current
+    master before the ff-merge so the merge works and master ends up as
+    a linear history of operator-commit + tick-commit."""
+    repo = _make_repo(tmp_path / "r")
+    _make_origin(repo, tmp_path / "o.git")
+    git_ops.create_tick_branch(repo, 81)
+    # Pretend the operator pushed an unrelated commit to master while
+    # the agent was working: modify an EXISTING file (test_core.py) on
+    # master so the tick branch's base falls behind. We modify a
+    # different file from what the agent will touch, so rebase succeeds
+    # without conflicts.
+    _run(repo, ["checkout", "master"])
+    (repo / "tests" / "test_core.py").write_text(
+        "def test_x(): pass\ndef test_operator(): pass\n", encoding="utf-8"
+    )
+    _run(repo, ["add", "tests/test_core.py"])
+    _run(repo, ["commit", "-q", "-m", "operator: unrelated"])
+    _run(repo, ["checkout", "evolve/tick-81"])
+    # Agent's edit lands on the tick branch (which is now BEHIND master).
+    (repo / "src" / "edx" / "core.py").write_text(
+        "def hello(): return 'AGENT'\n", encoding="utf-8"
+    )
+
+    res = git_ops.commit_and_merge(
+        repo, 81, "evolve(81): patch", push=True
+    )
+    assert res.commit_sha, f"expected success, got {res.notes}"
+    assert res.pushed is True
+    assert any(n.startswith("rebased_onto:") for n in res.notes)
+    # Master now has BOTH commits.
+    log = _run(repo, ["log", "--oneline", "master"])
+    assert "evolve(81): patch" in log
+    assert "operator: unrelated" in log
+
+
+def test_commit_and_merge_aborts_rebase_on_conflict(
+    tmp_path: Path,
+) -> None:
+    """If the operator's mid-tick commit touches the SAME file as the
+    agent's patch, rebase will conflict. ``commit_and_merge`` must abort
+    the rebase cleanly and return ``rebase_failed`` rather than leave
+    the working tree in an inconsistent state."""
+    repo = _make_repo(tmp_path / "r")
+    _make_origin(repo, tmp_path / "o.git")
+    git_ops.create_tick_branch(repo, 82)
+    # Operator's mid-tick commit on master touches core.py.
+    _run(repo, ["checkout", "master"])
+    (repo / "src" / "edx" / "core.py").write_text(
+        "def hello(): return 'OPERATOR'\n", encoding="utf-8"
+    )
+    _run(repo, ["add", "src/edx/core.py"])
+    _run(repo, ["commit", "-q", "-m", "operator: edit core"])
+    _run(repo, ["checkout", "evolve/tick-82"])
+    # Agent changes the SAME line on the tick branch (different value).
+    (repo / "src" / "edx" / "core.py").write_text(
+        "def hello(): return 'AGENT'\n", encoding="utf-8"
+    )
+
+    res = git_ops.commit_and_merge(
+        repo, 82, "evolve(82): edit core", push=True
+    )
+    assert "rebase_failed" in res.notes
+    # Should not have pushed.
+    assert res.pushed is False
+    # Working tree should not be in a half-rebased state — `git status`
+    # should be clean wrt rebase markers.
+    status = _run(repo, ["status", "--porcelain=v2"])
+    assert "REBASE" not in status.upper()
+
+
 def test_commit_and_merge_recovers_when_head_drifted_to_master(
     tmp_path: Path,
 ) -> None:
