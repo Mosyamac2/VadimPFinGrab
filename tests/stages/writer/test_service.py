@@ -193,6 +193,94 @@ def test_writer_marks_validated_publications_as_written(
             assert row is not None and row.status == "written"
 
 
+def test_writer_tickers_sheet_unions_db_with_config(
+    tmp_path: Path,
+) -> None:
+    """Anti-regression: the ``tickers`` sheet must reflect every ticker
+    the DB has ever recorded (so it stays consistent with the metrics
+    sheet, which is DB-backed). Tickers known only to the DB — typical of
+    synthetic ``EDX{id}`` tickers from evolve runs that re-write
+    ``config-evolve/tickers.yaml`` to the current 3-ticker batch — get
+    safe defaults: profile='non_bank', use_vision_extraction=False.
+    Tickers known only to the active config (newly-added but not yet
+    processed) ALSO appear so the prior contract is preserved."""
+    db = Database(tmp_path / "state.sqlite")
+    db.migrate()
+
+    # DB has 4 issuers: 2 also in config (SBER/GAZP), 2 evolve-only
+    # (EDX1021/EDX105 — synthetic tickers from prior evolve ticks).
+    with closing(db.connect()) as conn:
+        TickersRepo(db, conn).upsert_from_config(
+            [
+                TickerEntry(ticker="SBER", e_disclosure_id="1", name="Sberbank"),
+                TickerEntry(ticker="GAZP", e_disclosure_id="2", name="Gazprom"),
+                TickerEntry(
+                    ticker="EDX1021",
+                    e_disclosure_id="1021",
+                    name="НОТА-Банк",
+                ),
+                TickerEntry(
+                    ticker="EDX105",
+                    e_disclosure_id="105",
+                    name="НИКО-БАНК",
+                ),
+            ]
+        )
+
+    # Config has SBER + GAZP + LKOH (LKOH is configured but not yet in DB
+    # — newly added).
+    config = TickersConfig(
+        tickers=[
+            TickerEntry(
+                ticker="SBER", e_disclosure_id="1", name="Sberbank",
+                profile="bank",
+            ),
+            TickerEntry(
+                ticker="GAZP", e_disclosure_id="2", name="Gazprom",
+                profile="non_bank",
+            ),
+            TickerEntry(
+                ticker="LKOH", e_disclosure_id="17", name="Lukoil",
+                profile="non_bank", use_vision_extraction=True,
+            ),
+        ]
+    )
+
+    excel_path = tmp_path / "out.xlsx"
+    with closing(db.connect()) as conn:
+        WriterService(
+            PublicationsRepo(db, conn),
+            MetricsRepo(db, conn),
+            EventsRepo(db, conn),
+            QAIssuesRepo(db, conn),
+            TickersRepo(db, conn),
+            tickers_config=config,
+            excel_path=excel_path,
+        ).run()
+
+    wb = load_workbook(excel_path)
+    rows = list(wb["tickers"].iter_rows(values_only=True))
+    header, *data = rows
+    by_ticker = {r[0]: r for r in data}
+
+    # All 4 DB tickers + 1 config-only ticker = 5 rows.
+    assert set(by_ticker) == {"SBER", "GAZP", "EDX1021", "EDX105", "LKOH"}, (
+        f"unexpected tickers on sheet: {set(by_ticker)}"
+    )
+
+    # Configured tickers carry their config-declared profile + vision flag.
+    assert by_ticker["SBER"][2] == "bank"
+    assert by_ticker["GAZP"][2] == "non_bank"
+    assert by_ticker["LKOH"][2] == "non_bank"
+    assert by_ticker["LKOH"][4] is True  # use_vision_extraction
+
+    # Synthetic EDX-tickers known only to the DB get safe defaults.
+    assert by_ticker["EDX1021"][2] == "non_bank"
+    assert by_ticker["EDX1021"][4] is False
+    assert by_ticker["EDX105"][2] == "non_bank"
+    assert by_ticker["EDX105"][4] is False
+
+
 def test_writer_idempotent_second_run(
     workspace: tuple[Database, Path],
 ) -> None:

@@ -115,18 +115,61 @@ class WriterService:
             for issue in self.qa_issues_repo.list_all()
         ]
 
-        # Patch 19: emit one row per configured ticker so analysts see
-        # which metric set (bank vs non_bank) each issuer was scored on.
-        ticker_rows = [
-            TickerExportRow(
-                ticker=entry.ticker,
-                name=entry.name,
-                profile=entry.profile,
-                e_disclosure_id=entry.e_disclosure_id,
-                use_vision_extraction=entry.use_vision_extraction,
+        # Emit one row per ticker the DB has ever recorded — i.e. every
+        # issuer for which we've actually pulled disclosure data. Earlier
+        # versions sourced this sheet from ``self.tickers_config.tickers``
+        # (the YAML config), which during evolve runs is rewritten to the
+        # current 3-ticker batch and so dropped every previously-processed
+        # company from the sheet, while the metrics sheet (DB-backed) kept
+        # accumulating them. The two sheets disagreed by design; this
+        # change makes them consistent.
+        #
+        # The DB has ``ticker / name / e_disclosure_id`` but not ``profile``
+        # or ``use_vision_extraction``, so we look those up in the config
+        # when available and fall back to safe defaults for tickers that
+        # exist only in the DB (typically synthetic ``EDX{id}`` tickers
+        # from evolve runs whose profile lives in
+        # ``e-disclosure-companies.csv`` and not in any YAML config the
+        # writer can see).
+        config_by_ticker = {
+            entry.ticker: entry for entry in self.tickers_config.tickers
+        }
+        ticker_rows: list[TickerExportRow] = []
+        seen_in_db: set[str] = set()
+        for db_row in sorted(
+            self.tickers_repo.list_active(), key=lambda t: t.ticker
+        ):
+            seen_in_db.add(db_row.ticker)
+            cfg = config_by_ticker.get(db_row.ticker)
+            ticker_rows.append(
+                TickerExportRow(
+                    ticker=db_row.ticker,
+                    name=db_row.name,
+                    profile=cfg.profile if cfg is not None else "non_bank",
+                    e_disclosure_id=db_row.e_disclosure_id,
+                    use_vision_extraction=(
+                        cfg.use_vision_extraction
+                        if cfg is not None
+                        else False
+                    ),
+                )
             )
-            for entry in self.tickers_config.tickers
-        ]
+        # Also include any config-only tickers that haven't yet been seen
+        # in the DB (newly added but not processed): preserves the prior
+        # contract that ``config/tickers.yaml`` is authoritative for new
+        # additions until first run.
+        for entry in self.tickers_config.tickers:
+            if entry.ticker in seen_in_db:
+                continue
+            ticker_rows.append(
+                TickerExportRow(
+                    ticker=entry.ticker,
+                    name=entry.name,
+                    profile=entry.profile,
+                    e_disclosure_id=entry.e_disclosure_id,
+                    use_vision_extraction=entry.use_vision_extraction,
+                )
+            )
 
         meta = MetaSnapshot(
             last_updated_at=datetime.now(UTC).isoformat(timespec="seconds"),
