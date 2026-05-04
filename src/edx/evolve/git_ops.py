@@ -173,13 +173,39 @@ def commit_and_merge(
     # Sanity: we must be on the tick branch.
     here = current_branch(cwd)
     if here != branch:
-        return GitMergeResult(
-            branch=branch,
-            commit_sha=None,
-            pushed=False,
-            rolled_back=False,
-            notes=(f"not_on_tick_branch:{here}",),
-        )
+        # Recovery: HEAD has drifted off the tick branch (e.g. concurrent
+        # operator activity moved HEAD to master while the agent ran).
+        # The tick branch was created from master at tick start, so any
+        # working-tree diff vs that branch IS the agent's patch — which
+        # is exactly what we want to commit. Use ``symbolic-ref`` rather
+        # than ``checkout`` so we don't disturb the working tree (a real
+        # checkout would refuse if uncommitted edits and the target
+        # branch's worktree diverge). Only attempt this if the tick
+        # branch actually exists; otherwise the orchestrator never got
+        # to create_tick_branch and there's no recovery.
+        tick_branch_sha = _safe_git(
+            cwd, ["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"]
+        ).strip()
+        if tick_branch_sha:
+            prior_here = here
+            try:
+                _git_text(
+                    cwd,
+                    ["symbolic-ref", "HEAD", f"refs/heads/{branch}"],
+                )
+                here = current_branch(cwd)
+                if here == branch:
+                    notes.append(f"head_recovered_from:{prior_here}")
+            except subprocess.CalledProcessError:
+                pass
+        if here != branch:
+            return GitMergeResult(
+                branch=branch,
+                commit_sha=None,
+                pushed=False,
+                rolled_back=False,
+                notes=(f"not_on_tick_branch:{here}",),
+            )
 
     if target_branch not in PROTECTED_BRANCHES:
         return GitMergeResult(

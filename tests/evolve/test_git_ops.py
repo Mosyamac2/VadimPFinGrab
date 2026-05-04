@@ -171,6 +171,38 @@ def test_commit_and_merge_not_on_tick_branch(tmp_path: Path) -> None:
     assert any(n.startswith("not_on_tick_branch:") for n in res.notes)
 
 
+def test_commit_and_merge_recovers_when_head_drifted_to_master(
+    tmp_path: Path,
+) -> None:
+    """Anti-regression for production tick #77: HEAD got switched back to
+    master mid-tick (concurrent operator activity). The agent's working-tree
+    edits + the tick branch both still exist. ``commit_and_merge`` must
+    soft-recover by symbolic-ref'ing HEAD back onto evolve/tick-N rather
+    than aborting the entire tick as ``not_on_tick_branch``."""
+    repo = _make_repo(tmp_path / "r")
+    _make_origin(repo, tmp_path / "o.git")
+    git_ops.create_tick_branch(repo, 77)
+    # Stage agent's "edit" while on the tick branch.
+    (repo / "src" / "edx" / "patch.py").write_text(
+        "ok\n", encoding="utf-8"
+    )
+    (repo / "evolution" / "MEMORY.md").write_text(
+        "# Self-Evolve Long-Term Memory\n\n### evolve(77) — 2026-05-04 — foo\n",
+        encoding="utf-8",
+    )
+    # Simulate the bug: HEAD gets flipped to master (e.g. operator did a
+    # git operation on master in the same working tree). The tick branch
+    # still exists at the same sha; the working-tree edits are still there.
+    _run(repo, ["symbolic-ref", "HEAD", "refs/heads/master"])
+
+    res = git_ops.commit_and_merge(
+        repo, 77, "evolve(77): patch", push=True
+    )
+    assert res.commit_sha, f"expected successful commit, got {res.notes}"
+    assert res.pushed is True
+    assert any(n.startswith("head_recovered_from:") for n in res.notes)
+
+
 def test_abandon_branch_idempotent(tmp_path: Path) -> None:
     repo = _make_repo(tmp_path / "r")
     git_ops.create_tick_branch(repo, 7)
