@@ -76,6 +76,73 @@ def test_openrouter_key_alone_no_longer_provisions_a_provider(
         build_llm_provider(settings)
 
 
+def test_explicit_env_picks_claude_code_when_oauth_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``EDX_LLM_PROVIDER=claude_code`` forces the subprocess provider
+    even when an Anthropic API key is also present."""
+    from edx.providers.llm.claude_code_provider import (
+        CLAUDE_OAUTH_ENV_VAR,
+        ClaudeCodeLLMProvider,
+    )
+
+    monkeypatch.setenv("EDX_LLM_PROVIDER", "claude_code")
+    monkeypatch.setenv(CLAUDE_OAUTH_ENV_VAR, "sk-ant-oat01-fake")
+    settings = _settings(tmp_path)
+    _patch_secrets(settings, anthropic="sk-ant-1")  # API key also set
+    provider = build_llm_provider(settings)
+    assert isinstance(provider, CachedLLMProvider)
+    assert isinstance(provider.inner, ClaudeCodeLLMProvider)
+
+
+def test_explicit_env_claude_code_without_oauth_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``EDX_LLM_PROVIDER=claude_code`` without ``CLAUDE_CODE_OAUTH_TOKEN``
+    set must raise — no silent fallthrough."""
+    from edx.providers.llm.claude_code_provider import CLAUDE_OAUTH_ENV_VAR
+
+    monkeypatch.setenv("EDX_LLM_PROVIDER", "claude_code")
+    monkeypatch.delenv(CLAUDE_OAUTH_ENV_VAR, raising=False)
+    settings = _settings(tmp_path)
+    _patch_secrets(settings, anthropic="sk-ant-1")
+    with pytest.raises(LLMUnavailableError, match=CLAUDE_OAUTH_ENV_VAR):
+        build_llm_provider(settings)
+
+
+def test_auto_pick_claude_code_when_only_oauth_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No explicit ``EDX_LLM_PROVIDER``, no ``ANTHROPIC_API_KEY``, but
+    ``CLAUDE_CODE_OAUTH_TOKEN`` set → auto-pick claude_code."""
+    from edx.providers.llm.claude_code_provider import (
+        CLAUDE_OAUTH_ENV_VAR,
+        ClaudeCodeLLMProvider,
+    )
+
+    monkeypatch.delenv("EDX_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv(CLAUDE_OAUTH_ENV_VAR, "sk-ant-oat01-fake")
+    settings = _settings(tmp_path)
+    settings.secrets.anthropic_api_key = None
+    settings.secrets.openrouter_api_key = None
+    provider = build_llm_provider(settings)
+    inner = (
+        provider.inner if isinstance(provider, CachedLLMProvider) else provider
+    )
+    assert isinstance(inner, ClaudeCodeLLMProvider)
+
+
+def test_unrecognised_env_provider_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EDX_LLM_PROVIDER", "openai")
+    settings = _settings(tmp_path)
+    _patch_secrets(settings, anthropic="sk-ant-1")
+    with pytest.raises(LLMUnavailableError, match="not recognised"):
+        build_llm_provider(settings)
+
+
 def test_cache_disabled_returns_raw_provider(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     _patch_secrets(settings, anthropic="sk-ant")

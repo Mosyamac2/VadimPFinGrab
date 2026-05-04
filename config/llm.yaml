@@ -1,17 +1,33 @@
 # LLM provider configuration (ТЗ §17).
 #
-# Primary channel: direct Anthropic API (better PDF support, prompt caching).
-# Fallback channel: OpenRouter — used automatically when the primary key is
-# missing or the API call fails after `max_retries` retries.
+# The factory picks ONE provider per the rules in
+# src/edx/providers/llm/factory.py. There is no longer a runtime
+# fallback chain (OpenRouter was dropped in May 2026 per operator
+# decision — single billing channel preferred).
 
+# `anthropic`: direct Anthropic API via SDK. Pay-per-token API billing.
 primary:
   enabled: true
   model: claude-sonnet-4-6
   enable_pdf_input: true
   enable_prompt_caching: true
 
-fallback:
+# `claude_code`: subprocess `claude -p`. Billed against Max OAuth quota
+# (free for Max subscribers). Selected when EDX_LLM_PROVIDER=claude_code
+# or auto-picked when CLAUDE_CODE_OAUTH_TOKEN is set and
+# ANTHROPIC_API_KEY isn't.
+claude_code:
   enabled: true
+  model: claude-sonnet-4-6
+  timeout_seconds: 300
+  max_turns: 5
+  max_repair_attempts: 1
+
+# `openrouter`: dropped from runtime selection but kept here so that
+# adding `EDX_LLM_PROVIDER=openrouter` support back later is a one-line
+# factory change without re-introducing the schema. Unused at runtime.
+fallback:
+  enabled: false
   model: anthropic/claude-sonnet-4.6
   base_url: https://openrouter.ai/api/v1
 

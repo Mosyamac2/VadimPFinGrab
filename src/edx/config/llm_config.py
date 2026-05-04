@@ -30,11 +30,34 @@ class OpenRouterProviderConfig(BaseModel):
     base_url: str = "https://openrouter.ai/api/v1"
 
 
+class ClaudeCodeProviderConfig(BaseModel):
+    """Subprocess ``claude -p`` provider, billed against Max OAuth.
+
+    See ``src/edx/providers/llm/claude_code_provider.py``. Used when
+    the operator wants to consolidate billing onto the same Claude
+    Pro/Max subscription that powers the evolve agent. Selected via
+    the ``EDX_LLM_PROVIDER=claude_code`` env var (or auto-picked when
+    ``CLAUDE_CODE_OAUTH_TOKEN`` is set and ``ANTHROPIC_API_KEY`` is
+    not).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    model: str = Field(default="claude-sonnet-4-6", min_length=1)
+    timeout_seconds: int = Field(default=300, gt=0)
+    max_turns: int = Field(default=5, gt=0)
+    max_repair_attempts: int = Field(default=1, ge=0)
+
+
 class LLMConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     primary: AnthropicProviderConfig = Field(default_factory=AnthropicProviderConfig)
     fallback: OpenRouterProviderConfig = Field(default_factory=OpenRouterProviderConfig)
+    claude_code: ClaudeCodeProviderConfig = Field(
+        default_factory=ClaudeCodeProviderConfig
+    )
     max_tokens: int = Field(default=4096, gt=0)
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     request_timeout_s: float = Field(default=120.0, gt=0)

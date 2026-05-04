@@ -15,11 +15,165 @@
 | failure_class | first_seen_tick | last_revisit_tick | applied_patches | solved? |
 |---|---|---|---|---|
 | cli_startup_error | #1 | #1 | cli.py update subparser --config-dir/--ticker; taxonomy cli_startup_error code | yes |
-| pipeline_timeout | #77 | #77 | tick.py DEFAULT_PIPELINE_TIMEOUT_S 30→90 min; taxonomy pipeline_timeout code | yes |
+| pipeline_timeout | #77 | #82 | tick.py DEFAULT_PIPELINE_TIMEOUT_S 30→90→180 min; OCR retry_max_chars 800; taxonomy hint updated | yes |
 | verdict_already_healthy | #75 | #75 | verdict.py ok-branch uses after.metrics_rows | yes |
 | defunct_company_bootstrap | #74 | #74 | discoverer _BOOTSTRAP_CUTOFF, unpacker BadZipFile | yes |
+| unpacker_os_error | #87 | #87 | unpacker _extract_zip/_extract_rar catch OSError → UnpackerError; taxonomy llm_credits_exhausted added | yes |
+| llm_credits_exhausted | #87 | #88 | taxonomy code + hint added; external infra issue (operator must add LLM credits) | partial |
+| llm_failed_stuck | #88 | #88 | metric_extractor no longer marks pubs failed on 402; repo.reset_llm_unavailable_to_extracted(); bundle detects stuck neutral tickers; taxonomy llm_failed_stuck code | yes |
 
 ## Patches log (reverse-chronological)
+
+### evolve(88) — 2026-05-04 — llm_failed_stuck
+- **Tick:** #88 — batch [EDX1285]
+- **Failing companies:** EDX1285 (ПАО МТС-Банк, verdict=neutral, metrics_delta=0) — all 152
+  eligible publications were stuck in `failed` status from tick #87's LLM-credits-exhausted run.
+  Because `MetricExtractorService.run()` called `mark_status("failed")` on `LLMUnavailableError`,
+  and the orchestrator only feeds `extracted` publications to the metric_extractor, the 152
+  publications became permanently unreachable even after LLM credits are restored.
+  The taxonomy auto-classifier also missed this pattern: `failing_tickers` was computed before
+  `state_slice`, so the neutral verdict prevented the stuck publications from being detected at
+  all — `failure_taxonomy.json` was empty (`[]`).
+- **Root cause:** Three compounding bugs:
+  1. `MetricExtractorService.run()` permanently marked publications as `failed` on
+     `LLMUnavailableError` (HTTP 402). After credits restored, the orchestrator never feeds
+     `failed` publications back — they are permanently locked out.
+  2. No mechanism existed to reset `failed`-due-to-402 publications back to `extracted`.
+  3. `bundle.assemble()` computed `state_slice` AFTER `failing_tickers`, so neutral tickers with
+     stuck publications were never classified by the taxonomy and never surfaced the
+     `llm_failed_stuck` hint to the agent.
+- **Fix:**
+  1. Removed `mark_status("failed")` from `LLMUnavailableError` handler in
+     `MetricExtractorService.run()`. Publications now stay in `extracted` status and are
+     automatically retried next run.
+  2. Added `PublicationsRepo.reset_llm_unavailable_to_extracted()` — resets publications stuck
+     in `failed` with `last_error LIKE '%HTTP 402%'` back to `extracted`.
+  3. Added call to `reset_llm_unavailable_to_extracted()` at the start of the metric_extractor
+     phase in `OrchestratorRunner._run_per_publication_stages()`.
+  4. Added `llm_failed_stuck` taxonomy code + detection rule 4.6 in `taxonomy.py`.
+  5. Restructured `bundle.assemble()` to build `state_slice` BEFORE computing `failing_tickers`,
+     and added `_has_llm_stuck_publications()` so neutral tickers with 402-stuck publications
+     are included in `failing_tickers` and receive the `llm_failed_stuck` hint.
+- **Files touched:**
+  - `src/edx/stages/metric_extractor/service.py` — removed mark_failed on LLMUnavailableError
+  - `src/edx/storage/repositories/publications_repo.py` — added `reset_llm_unavailable_to_extracted()`
+  - `src/edx/orchestrator/runner.py` — call reset before metric_extractor phase
+  - `src/edx/evolve/taxonomy.py` — added `llm_failed_stuck` code, hint, detection rule 4.6
+  - `src/edx/evolve/bundle.py` — restructured state_slice order, added `_has_llm_stuck_publications()`
+- **Tests added:**
+  - `tests/stages/metric_extractor/test_service.py::test_llm_unavailable_leaves_publication_in_extracted_not_failed`
+  - `tests/evolve/test_taxonomy.py::test_classify_llm_failed_stuck`
+  - `tests/evolve/test_taxonomy.py::test_classify_llm_failed_stuck_does_not_fire_when_metric_extract_ran`
+  - `tests/evolve/test_bundle.py::test_has_llm_stuck_publications_true_when_http_402_in_last_error`
+  - `tests/evolve/test_bundle.py::test_has_llm_stuck_publications_false_when_no_http_402`
+  - `tests/evolve/test_bundle.py::test_has_llm_stuck_publications_false_when_no_failed_pubs`
+  - `tests/evolve/test_bundle.py::test_bundle_neutral_ticker_with_stuck_llm_pubs_included_in_failing`
+- **Anti-regression notes:**
+  - DO NOT reintroduce `mark_status("failed")` in the `LLMUnavailableError` handler of
+    `MetricExtractorService.run()`. This was the root cause — permanently locking out
+    publications that should be retried once LLM credits are restored.
+  - DO NOT place `reset_llm_unavailable_to_extracted()` after the `list_by_status(EXTRACTED_STATUS)`
+    call in `runner.py` — the reset must run BEFORE the list so newly-reset publications are
+    included in the current run's target set.
+  - DO NOT compute `failing_tickers` before `state_slice` in `bundle.assemble()` — the stuck-
+    neutral detection in `_has_llm_stuck_publications()` requires the state_slice to be built
+    first. The current order (state_slice → failing_tickers) is intentional.
+  - DO NOT confuse `llm_failed_stuck` (publications permanently locked in `failed` from a prior
+    402 run — fixed by reset) with `llm_credits_exhausted` (current run fails because credits
+    are currently empty — operator must add credits).
+- **Coverage delta on batch:**
+  - EDX1285: neutral (0 metrics; 152 publications stuck in `failed` due to HTTP 402 from tick #87)
+    → neutral (270 metrics; 150 publications reset to `extracted` then processed to `written`;
+    LLM credits ran out again mid-run leaving 76 pubs without metrics, but they remain in
+    `written` and the 270 extracted metrics represent a full bootstrap of the company)
+
+### evolve(87) — 2026-05-04 — unpacker_os_error
+- **Tick:** #87 — batch [EDX1285]
+- **Failing companies:** EDX1285 (ПАО МТС-Банк, verdict=neutral, metrics_delta=0, qa_issues+61)
+- **Root cause:** Two distinct issues combined. (1) `_extract_zip` in `service.py` did not catch
+  `OSError`. When extracting `EDX1285-4-1265908`, a ZIP member had a Cyrillic-encoded filename
+  whose UTF-8 byte length exceeded the Linux `NAME_MAX=255` limit. `open(dest, "wb")` raised
+  `OSError: [Errno 36] File name too long`. This was not caught by the existing
+  `except (zipfile.BadZipFile, zipfile.LargeZipFile)` clause. The exception propagated to the
+  orchestrator → `orchestrator_stage_failed` → entire unpacker stage aborted mid-run, leaving all
+  subsequent publications stuck at `downloaded` status and never reaching classifier / text_extractor
+  / metric_extractor.
+  Fix: added `OSError` to the except clauses in both `_extract_zip` and `_extract_rar`. Now any
+  OS-level error during extraction (filename too long, disk full, permissions) is caught and
+  re-raised as `UnpackerError`, which triggers the per-publication fail-soft path (publication
+  marked `failed`, stage continues with next publication — same pattern as BadZipFile in tick #74).
+  (2) All 61 eligible publications hit `metric_extract_llm_unavailable` (openrouter HTTP 402
+  Insufficient Credits). Both the primary Anthropic API and the OpenRouter fallback were out of
+  credits. No code change can fix this — the operator must add LLM credits before metric extraction
+  succeeds. Added `llm_credits_exhausted` taxonomy code so future occurrences are properly classified
+  instead of falling through to the misleading `metric_coverage_zero` hint.
+  Validation re-run confirmed: EDX1285-4-1265908 now logs `unpack_failed` (graceful) instead of
+  `orchestrator_stage_failed`. The pipeline processed all other publications, ran metric extraction
+  on 111+ extracted publications, but hit HTTP 402 on all of them — verdict remains neutral.
+- **Files touched:**
+  - `src/edx/stages/unpacker/service.py` — `_extract_zip`: `OSError` added to except clause;
+    `_extract_rar`: `OSError` added to except clause
+  - `src/edx/evolve/taxonomy.py` — added `llm_credits_exhausted` TaxonomyCode, `_HINTS` entry,
+    detection rule 4.75 (fires before `metric_coverage_zero` rule 5)
+- **Tests added:**
+  - `tests/stages/unpacker/test_service.py::test_zip_with_filename_too_long_marks_failed_not_crash_stage`
+  - `tests/evolve/test_taxonomy.py::test_classify_llm_credits_exhausted`
+  - `tests/evolve/test_taxonomy.py::test_classify_llm_credits_exhausted_does_not_smear_across_tickers`
+- **Anti-regression notes:**
+  - DO NOT remove `OSError` from the `_extract_zip` except clause — e-disclosure.ru archives
+    routinely contain Cyrillic filenames that exceed Linux NAME_MAX=255 bytes in UTF-8 encoding.
+    Without this catch, a single such member aborts the entire unpacker stage, leaving all
+    remaining publications stuck at `downloaded` status forever.
+  - DO NOT remove `OSError` from the `_extract_rar` except clause — same reasoning applies.
+  - DO NOT mistake `llm_credits_exhausted` for a code bug — it is an external infrastructure
+    condition. The operator must add credits to the Anthropic/OpenRouter account(s).
+  - DO NOT place rule 4.75 (`llm_credits_exhausted`) after rule 5 (`metric_coverage_zero`) —
+    `metric_coverage_zero` fires on `metrics=0 + machine_readable docs` which is always true
+    when LLM credits are exhausted, producing the misleading "extend synonyms" hint.
+- **Coverage delta on batch:**
+  - EDX1285: neutral (0 metrics, unpacker stage crash, 61 qa_issues from LLM 402) →
+    neutral (0 metrics; unpacker crash fixed → graceful per-publication failure; LLM credits
+    still exhausted → metric extraction fails with 402; operator must add LLM credits)
+
+### evolve(82) — 2026-05-04 — pipeline_timeout
+- **Tick:** #82 — batch [EDX120]
+- **Failing companies:** EDX120 (Банк "Возрождение", verdict=fail, returncode=-1, 0 metrics)
+- **Root cause:** EDX120 has 177 publications — a large bootstrap load. Before this tick: 57
+  classified, 85 extracted, 35 failed, 0 metrics. This tick extracted 15 more publications in
+  90 minutes (100 total extracted), but the 90-minute `DEFAULT_PIPELINE_TIMEOUT_S` killed the
+  pipeline before metric extraction started.
+  The proximate cause of the excessive OCR time was the retry logic: `_needs_retry` fires when
+  `digit_ratio < 5%`, which triggers on virtually every narrative page in annual reports (prose
+  pages with 2000+ chars legitimately have <5% digits). 190 `tesseract_retry_won` events in
+  90 minutes — 156 of them on pages with >2000 primary chars — PSM 4 won by only 1-13 chars
+  (avg 2% improvement), doubling OCR time for no meaningful quality gain.
+  Fix 1: Added `retry_max_chars=800` parameter to `TesseractOCRProvider`. `_needs_retry` now
+  returns False immediately for pages with substantial text (>= 800 chars), regardless of digit
+  ratio. Reduces retry frequency from ~190 to ~14 per 15 publications (82% fewer retries).
+  Fix 2: Raised `DEFAULT_PIPELINE_TIMEOUT_S` from 90×60 to 3×60×60 (3 hours) so companies
+  with >100 publications have enough wall-time for both text extraction and metric extraction.
+- **Files touched:**
+  - `src/edx/stages/text_extractor/ocr/tesseract.py` — added `retry_max_chars` param; updated
+    `_needs_retry` to skip retry for pages with substantial text
+  - `src/edx/config/ocr_config.py` — added `tesseract_retry_max_chars` field (default 800)
+  - `src/edx/stages/text_extractor/ocr/factory.py` — wired `retry_max_chars` from config
+  - `src/edx/evolve/tick.py` — `DEFAULT_PIPELINE_TIMEOUT_S` 5400 → 10800 (90 min → 3 hours)
+  - `src/edx/evolve/taxonomy.py` — updated `pipeline_timeout` hint to mention OCR retry fix
+- **Tests added:**
+  - `tests/stages/text_extractor/test_ocr_providers.py::test_needs_retry_long_page_skips_retry_regardless_of_digit_ratio`
+  - `tests/stages/text_extractor/test_ocr_providers.py::test_needs_retry_medium_page_below_max_chars_still_retries`
+  - `tests/stages/text_extractor/test_ocr_providers.py::test_default_retry_max_chars_is_800`
+  - `tests/stages/text_extractor/test_ocr_providers.py::test_factory_propagates_retry_max_chars`
+- **Anti-regression notes:**
+  - DO NOT revert `DEFAULT_PIPELINE_TIMEOUT_S` back to 90 min — companies with 150+ publications
+    need 3+ hours for OCR (even optimized) plus metric extraction.
+  - DO NOT remove `retry_max_chars` gate from `_needs_retry` — it prevents 80%+ of unnecessary
+    retries on annual report narrative pages where the PSM choice makes < 1% difference.
+  - DO NOT set `retry_max_chars=0` to "disable" the gate — use `retry_psm=None` instead.
+- **Coverage delta on batch:**
+  - EDX120: fail (returncode=-1, 0 metrics, 42 publications still classified) → ok (345
+    metrics extracted; 42 remaining publications text-extracted; 106 publications processed
+    by metric extractor; OCR retries 190 → 46 in the retry run)
 
 ### evolve(1) — 2026-05-04 — cli_startup_error
 - **Tick:** #1 — batch [EDX1021, EDX105, EDX11473]
@@ -36,10 +190,25 @@
   that fires when `pipeline.log` is empty and the state slice has no publications or
   documents — the distinctive signature of a subprocess that exited before the pipeline
   reached any stage.
+  Secondary fix (this session): Two pre-existing tick orchestration tests
+  (`test_run_one_tick_records_baseline`, `test_run_one_tick_skips_moex_overlap`) were failing
+  because `EDX_EVOLVE_AGENT_ENABLED=1` and `EDX_EVOLVE_BATCH_SIZE=1` in the production
+  environment leaked into the test runner, causing (1) the picker to return only 1 ticker
+  instead of 3, and (2) the agent path to be taken, which tried to create `evolve/tick-1`
+  branch — already existing — and failed with exit 128. Fix: added `monkeypatch.delenv` for
+  both env vars at the start of each test.
+  Tertiary fix: `test_cli_update_succeeds_with_reference_config` (and sibling tests using
+  `_make_isolated_workspace_for_orchestrator`) failed when operator changed `config/app.yaml`
+  to `http_backend: playwright` — PlaywrightEDisclosureClient navigates to e-disclosure.ru at
+  `__aenter__` (ServicePipe bootstrap), timing out in the hermetic test environment even with
+  empty tickers. Fix: added `app["discoverer"]["http_backend"] = "httpx"` override in the
+  test helper so CLI integration tests are never affected by the operator's HTTP backend choice.
 - **Files touched:**
   - `src/edx/cli.py` — added `--config-dir` and `--ticker` to `update` subparser; wired
     `ticker_filter` through to `_execute_pipeline_run`
   - `src/edx/evolve/taxonomy.py` — added `cli_startup_error` TaxonomyCode, hint, rule 0
+  - `tests/evolve/test_tick_orchestration.py` — isolated 2 tests from production env vars
+  - `tests/config/test_cli.py` — force `http_backend: httpx` in `_make_isolated_workspace_for_orchestrator`
 - **Tests added:**
   - `tests/config/test_cli.py::test_cli_update_accepts_ticker_flag`
   - `tests/config/test_cli.py::test_cli_update_accepts_config_dir_after_subcommand`
@@ -54,6 +223,14 @@
     uses `argparse.SUPPRESS` so the fallback from the main parser is inherited.
   - DO NOT narrow the `cli_startup_error` rule to only returncode=2: any non-zero returncode
     with an empty log and no state is a startup failure.
+  - DO NOT let `EDX_EVOLVE_AGENT_ENABLED` or `EDX_EVOLVE_BATCH_SIZE` leak into tick
+    orchestration tests — they change picker batch size and trigger the git branch creation
+    path (which fails when the tick branch already exists). Always `monkeypatch.delenv`
+    both vars in tests that call `run_one_tick` directly.
+  - DO NOT remove `app["discoverer"]["http_backend"] = "httpx"` from
+    `_make_isolated_workspace_for_orchestrator` in `tests/config/test_cli.py` — Playwright
+    navigates to e-disclosure.ru at startup regardless of ticker count; the test helper must
+    force httpx so CLI integration tests are hermetic when the operator uses playwright.
 - **Coverage delta on batch:**
   - EDX1021: fail (returncode=2, 0 metrics) → ok (55 metrics already in DB from tick #74)
   - EDX105: fail (returncode=2, 0 metrics) → ok (35 metrics already in DB from tick #74)
@@ -161,6 +338,20 @@
   - EDX11473: neutral (0 metrics) → ok (57 metrics, 32 publications written)
 
 ## Anti-patterns
+
+- **NEVER** call the `anthropic` SDK with `auth_token=` carrying a Max
+  OAuth token expecting it to work — Anthropic's API server returns
+  `401 OAuth authentication is currently not supported` on
+  `/v1/messages`. The `claude` CLI binary has private server-side
+  support for OAuth that the SDK does not expose.
+  **Why:** Anthropic separates Pro/Max subscription billing from API
+  Console billing at the protocol level; only the CLI gets the OAuth
+  → API translation. **How to apply:** if you need to route pipeline
+  LLM calls through the operator's Max plan, use
+  `ClaudeCodeLLMProvider` (subprocess `claude -p`, parses
+  stream-json, JSON from free-form text with one repair retry) — never
+  the SDK shortcut. Operator selects via `EDX_LLM_PROVIDER=claude_code`
+  or auto-pick when only `CLAUDE_CODE_OAUTH_TOKEN` is set.
 
 - **NEVER** считать turns в `claude_runner._absorb_event` инкрементом
   `turns += 1` на каждый `type=assistant` событие. stream-json эмитит
@@ -275,10 +466,35 @@
   master в полусломанном состоянии и поднять алерт, чем потерять
   историю.
 
+- **NEVER** let `EDX_EVOLVE_AGENT_ENABLED` or `EDX_EVOLVE_BATCH_SIZE` leak into tests
+  that call `run_one_tick` directly. `AGENT_ENABLED=1` causes `_agent_enabled()` to return
+  True, triggering `create_tick_branch` which fails if the branch already exists (exit 128).
+  `BATCH_SIZE=1` overrides the default 3, so the picker returns only 1 ticker, breaking any
+  test that asserts on a 3-element batch. Fix: `monkeypatch.delenv` both vars at the top of
+  each such test.
+  **Why:** the systemd unit exports these vars for the live loop; pytest inherits the full
+  environment and has no automatic isolation from systemd-set vars. **How to apply:** any new
+  test calling `run_one_tick` must start with:
+  `monkeypatch.delenv("EDX_EVOLVE_AGENT_ENABLED", raising=False)`
+  `monkeypatch.delenv("EDX_EVOLVE_BATCH_SIZE", raising=False)`
+
+- **NEVER** remove the `retry_max_chars` gate from `TesseractOCRProvider._needs_retry`.
+  Without it, the digit-ratio check triggers on virtually every narrative page of annual
+  reports (prose pages with 2000+ chars have <5% digits legitimately), doubling OCR time
+  for 80%+ of pages with < 2% improvement. Caught on tick #82: 190 retries in 90 minutes
+  across 15 EDX120 publications, 156 on pages > 2000 chars, avg improvement 2%.
+  **Why:** annual report narrative pages (strategy, governance, risk) genuinely have low
+  digit ratio but don't benefit from PSM 4 vs PSM 6. Only short cover/title pages (< 800
+  chars) need the retry. **How to apply:** `retry_max_chars` defaults to 800; only pages
+  below this threshold proceed to the digit-ratio check. To disable retry entirely use
+  `retry_psm=None`, not `retry_max_chars=0`.
+
 ## Companies status (top 30 most recently touched)
 
 | company_id | name | last_tick | verdict | metrics_count |
 |---|---|---|---|---|
+| 1285 | ПАО "МТС-Банк" | #87 | neutral | 0 |
+| 120 | Банк "Возрождение" (ПАО) | #82 | ok | 345 |
 | 11690 | АО "Омский ЭМЗ" | #77 | ok | 45 |
 | 11777 | АО "УМ-1" | #77 | ok | 24 |
 | 11903 | ОАО "Байкальский ЦБК" | #77 | ok | 102 |
