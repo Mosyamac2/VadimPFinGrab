@@ -104,8 +104,9 @@ def assemble(
     _render_state_slice_text(state_slice, bundle_dir / "state-slice.txt")
 
     # 5. taxonomy.
+    pipeline_rc = _extract_pipeline_returncode(verdicts)
     taxonomy: list[TaxonomyEntry] = (
-        classify_failures(log_path, state_slice, failing_tickers)
+        classify_failures(log_path, state_slice, failing_tickers, pipeline_rc)
         if failing_tickers
         else []
     )
@@ -161,6 +162,23 @@ def assemble(
         encoding="utf-8",
     )
     return manifest
+
+
+def _extract_pipeline_returncode(verdicts: dict[str, TickerVerdict]) -> int:
+    """Extract pipeline subprocess returncode from verdict notes.
+
+    ``compute_verdict`` stores ``f"returncode={rc}"`` in notes when rc != 0.
+    All tickers in a batch share the same subprocess, so we return the first
+    non-zero returncode found, or 0 when all ran cleanly / notes are absent.
+    """
+    for v in verdicts.values():
+        for note in v.notes:
+            if note.startswith("returncode="):
+                try:
+                    return int(note.split("=", 1)[1])
+                except (ValueError, IndexError):
+                    pass
+    return 0
 
 
 def _filter_errors(log_path: Path, target: Path) -> None:

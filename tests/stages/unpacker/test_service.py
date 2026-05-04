@@ -256,6 +256,54 @@ def test_validate_member_path_rejects_absolute(tmp_path: Path) -> None:
         conn.close()
 
 
+def test_corrupted_zip_marks_publication_failed_does_not_crash_stage(
+    tmp_path: Path,
+) -> None:
+    """BadZipFile (bad CRC-32 or truncated archive from e-disclosure.ru) must
+    mark the one publication as 'failed', not abort the whole unpacker stage.
+    The second publication in the same run must still be processed."""
+    db, conn, pub_dir = _seed_publication(tmp_path, pub_id="pub-bad")
+    raw_dir = tmp_path / "raw"
+
+    # Seed a second, healthy publication so we can verify the stage continues.
+    TickersRepo(db, conn).upsert_from_config(
+        [TickerEntry(ticker="SBER", e_disclosure_id="1", name="SBER")]
+    )
+    PublicationsRepo(db, conn).upsert_discovered(
+        publication_id="pub-good",
+        ticker="SBER",
+        publication_type="report",
+        publication_date="2026-04-02",
+        source_url="https://example.test/good.zip",
+    )
+    PublicationsRepo(db, conn).mark_status("pub-good", "downloaded", file_hash="y")
+    good_dir = raw_dir / "SBER" / "pub-good"
+    good_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(good_dir / "good.zip", "w") as zf:
+        zf.writestr("report.pdf", b"PDF-BYTES")
+
+    # Write a corrupt ZIP (valid magic bytes, garbage body → BadZipFile on open).
+    (pub_dir / "corrupt.zip").write_bytes(b"PK\x03\x04" + b"\xff" * 50)
+
+    try:
+        service = _service(db, conn, raw_dir=raw_dir)
+        repo = PublicationsRepo(db, conn)
+        bad_pub = repo.get_by_id("pub-bad")
+        good_pub = repo.get_by_id("pub-good")
+        assert bad_pub is not None and good_pub is not None
+        outcomes = service.run([bad_pub, good_pub])
+        bad_after = repo.get_by_id("pub-bad")
+        good_after = repo.get_by_id("pub-good")
+    finally:
+        conn.close()
+
+    assert bad_after is not None and bad_after.status == "failed"
+    assert bad_after.last_error is not None and "zip extraction failed" in bad_after.last_error
+    assert good_after is not None and good_after.status == "unpacked"
+    assert len(outcomes) == 2
+    assert outcomes[1].documents_added == 1
+
+
 @pytest.mark.skipif(
     shutil.which("unrar") is None and shutil.which("unar") is None,
     reason="no unrar/unar binary on PATH",

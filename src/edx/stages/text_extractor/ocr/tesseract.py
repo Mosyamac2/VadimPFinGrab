@@ -14,7 +14,7 @@ import shutil
 from pathlib import Path
 
 import pytesseract
-from pdf2image import convert_from_path
+from pdf2image import convert_from_path, pdfinfo_from_path
 
 from edx.logging_setup import get_logger
 from edx.stages.text_extractor.models import PageText
@@ -55,25 +55,39 @@ class TesseractOCRProvider:
         # pdf2image needs poppler-utils on PATH; an absence raises a
         # PDFInfoNotInstalledError which we let propagate (the service layer
         # logs and marks the publication failed).
-        images = convert_from_path(str(pdf_path), dpi=self.dpi)
+        #
+        # Process pages one at a time (first_page/last_page) so that peak
+        # memory is bounded by one page's rendered image instead of all pages
+        # simultaneously.  A 100-page PDF at 400 DPI loads ~4.6 GB when
+        # rendered at once; one-at-a-time keeps it at ~46 MB per page.
+        info = pdfinfo_from_path(str(pdf_path))
+        total_pages = int(info.get("Pages", 0))
         lang_arg = "+".join(langs) if langs else "eng"
 
         pages: list[PageText] = []
-        for index, image in enumerate(images):
+        for page_num in range(1, total_pages + 1):
+            images = convert_from_path(
+                str(pdf_path), dpi=self.dpi,
+                first_page=page_num, last_page=page_num,
+            )
+            if not images:
+                continue
+            image = images[0]
             text = self._run_once(image, lang_arg, self.psm)
             if self.retry_psm is not None and self._needs_retry(text):
                 retry_text = self._run_once(image, lang_arg, self.retry_psm)
                 if self._is_better(retry_text, text):
                     self._log.info(
                         "tesseract_retry_won",
-                        page=index + 1,
+                        page=page_num,
                         primary_psm=self.psm,
                         retry_psm=self.retry_psm,
                         primary_chars=len(text.strip()),
                         retry_chars=len(retry_text.strip()),
                     )
                     text = retry_text
-            pages.append(PageText(page_number=index + 1, text=text))
+            pages.append(PageText(page_number=page_num, text=text))
+            del image  # free PIL image memory before next page
         return pages
 
     def _run_once(self, image: object, lang_arg: str, psm: int) -> str:

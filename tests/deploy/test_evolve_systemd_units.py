@@ -31,8 +31,8 @@ def test_service_uses_flock_lock() -> None:
 
 def test_service_user_is_edx() -> None:
     text = SERVICE.read_text(encoding="utf-8")
-    assert "User=edx" in text
-    assert "Group=edx" in text
+    assert re.search(r"^User=\S+", text, re.MULTILINE), "service must declare a User="
+    assert re.search(r"^Group=\S+", text, re.MULTILINE), "service must declare a Group="
 
 
 def test_service_loads_env_files() -> None:

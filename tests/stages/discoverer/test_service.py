@@ -329,3 +329,58 @@ def test_compute_since_returns_none_for_unknown_ticker(tmp_path: Path) -> None:
             [TickerEntry(ticker="XYZ", e_disclosure_id="1", name="X")],
         )
     assert result == {"XYZ": None}
+
+
+@pytest.mark.asyncio
+async def test_run_bootstraps_unseen_ticker_with_old_publications(
+    tmp_path: Path,
+) -> None:
+    """Ticker with no prior DB entries (since=None) must import all-time history.
+
+    With backfill_years=1 the cutoff would be ~2025-05-03, which would exclude
+    publications dated 2015.  Since the ticker has never been seen (since=None),
+    _BOOTSTRAP_CUTOFF ("1900-01-01") is used instead so the full archive is
+    imported regardless of how old the publications are.
+    """
+    old_html = (
+        '<table class="zebra noBorderTbl centerHeader files-table"><tbody>'
+        "<tr><th>#</th><th>Тип</th><th>Период</th>"
+        "<th>Основание</th><th>Дата</th><th>Файл</th><th></th></tr>"
+        + "".join(
+            f"<tr>"
+            f"<td>{i}</td>"
+            f"<td>РСБУ</td>"
+            f"<td>2015, 3 месяца</td>"
+            f'<td class="date-cell">01.01.2015</td>'
+            f'<td class="date-cell">15.03.2015</td>'
+            f'<td class="file-cell">'
+            f'<a class="file-link" href="/portal/FileLoad.ashx?Fileid={1000 + i}"'
+            f' data-fileid="{1000 + i}">zip</a></td>'
+            f"<td></td></tr>"
+            for i in range(1, 4)
+        )
+        + "</tbody></table>"
+    )
+    pages = {2: (404, ""), 3: (200, old_html), 4: (404, ""), 5: (404, "")}
+    transport, _ = _per_type_transport(pages)
+    db, conn = _make_db_with_ticker(tmp_path, "NOVA", e_disclosure_id="99")
+    try:
+        publications_repo = PublicationsRepo(db, conn)
+        async with EDisclosureClient(
+            base_url="https://example.test",
+            user_agent="edx-test/1.0",
+            requests_per_second=100.0,
+            respect_robots=False,
+            transport=transport,
+        ) as client:
+            service = DiscovererService(
+                client, publications_repo, backfill_years=1
+            )
+            new_pubs = await service.run(
+                [TickerEntry(ticker="NOVA", e_disclosure_id="99", name="Nova")],
+                since={"NOVA": None},
+            )
+        assert len(new_pubs) == 3  # all 2015 pubs bootstrapped despite backfill_years=1
+        assert all(pub.publication_date == "2015-03-15" for pub in new_pubs)
+    finally:
+        conn.close()

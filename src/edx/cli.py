@@ -75,6 +75,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "update",
         help="Incremental run (the 'refresh' button). Default scheduled mode.",
     )
+    update_p.add_argument(
+        "--config-dir",
+        type=Path,
+        default=argparse.SUPPRESS,
+        help="Directory containing the six YAML config files (default: ./config).",
+    )
+    update_p.add_argument(
+        "--ticker",
+        action="append",
+        help="Restrict the pipeline to specific tickers (repeatable).",
+    )
     update_p.set_defaults(func=_cmd_update)
 
     run_p = subparsers.add_parser(
@@ -484,7 +495,8 @@ def _cmd_update(args: argparse.Namespace) -> int:
     settings_or_code = _load_settings_or_exit(args)
     if isinstance(settings_or_code, int):
         return settings_or_code
-    return _execute_pipeline_run(settings_or_code, mode="update")
+    ticker_filter = set(args.ticker) if args.ticker else None
+    return _execute_pipeline_run(settings_or_code, mode="update", ticker_filter=ticker_filter)
 
 
 def _cmd_run(args: argparse.Namespace) -> int:

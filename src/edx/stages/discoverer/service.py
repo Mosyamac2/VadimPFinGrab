@@ -45,6 +45,11 @@ from edx.storage import PublicationsRepo
 # scrape order. ``type=1`` (statutory docs) is excluded by design.
 REPORT_TYPE_CODES: Final[tuple[int, ...]] = (2, 3, 4, 5)
 
+# When a ticker has never been seen before (since_map[ticker] = None), use an
+# all-time horizon so inactive/defunct companies get bootstrapped with their
+# full historical archive rather than the last backfill_years window.
+_BOOTSTRAP_CUTOFF: Final[str] = "1900-01-01"
+
 
 class DiscovererService:
     """Glue between :class:`EDisclosureClient` and ``publications`` table."""
@@ -71,15 +76,19 @@ class DiscovererService:
         """For every ticker hit four listing URLs, parse, filter, persist.
 
         ``since[ticker]`` is the last known publication date (ISO ``YYYY-MM-DD``)
-        for that ticker, or ``None``/missing to fall back to the configured
-        backfill horizon (today − ``backfill_years``).
+        for that ticker, or ``None``/missing to bootstrap all-time history
+        (see ``_BOOTSTRAP_CUTOFF``).
         """
         since_map = dict(since or {})
-        backfill_cutoff = self._backfill_cutoff()
         new_publications: list[DiscoveredPublication] = []
 
         for ticker in tickers:
-            cutoff = since_map.get(ticker.ticker) or backfill_cutoff
+            # If the ticker has prior publications in the DB, since_map[ticker]
+            # is the latest known date → use that for incremental updates.
+            # If None (never seen), use _BOOTSTRAP_CUTOFF so the full archive
+            # is imported regardless of backfill_years (inactive companies with
+            # no recent publications would otherwise never be bootstrapped).
+            cutoff = since_map.get(ticker.ticker) or _BOOTSTRAP_CUTOFF
             for type_code in REPORT_TYPE_CODES:
                 pubs_for_type = await self._discover_one_type(
                     ticker, type_code=type_code, cutoff=cutoff

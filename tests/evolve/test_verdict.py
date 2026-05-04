@@ -40,9 +40,17 @@ def test_verdict_ok_when_metrics_grow_and_returncode_zero() -> None:
     assert v.publications_written_delta == 2
 
 
-def test_verdict_neutral_when_no_change() -> None:
+def test_verdict_ok_when_already_healthy_and_no_change() -> None:
+    """Already-healthy company (has metrics) with no new data this tick is ok."""
     before = _snap(metrics=3, written=1)
     after = _snap(metrics=3, written=1)
+    assert compute_verdict(before, after, pipeline_returncode=0).code == "ok"
+
+
+def test_verdict_neutral_when_no_metrics_and_no_change() -> None:
+    """Company with 0 metrics and no progress is neutral."""
+    before = _snap(metrics=0, written=0)
+    after = _snap(metrics=0, written=0)
     assert compute_verdict(before, after, pipeline_returncode=0).code == "neutral"
 
 

@@ -20,11 +20,15 @@ from pathlib import Path
 from typing import Final, Literal
 
 TaxonomyCode = Literal[
+    "cli_startup_error",
     "discoverer_403_servicepipe",
     "discoverer_no_publications",
+    "no_recent_publications",
     "period_unparseable",
     "classifier_other",
     "extract_text_too_short",
+    "pipeline_timeout",
+    "oom_kill",
     "metric_coverage_zero",
     "metric_coverage_low",
     "unique_constraint",
@@ -33,6 +37,13 @@ TaxonomyCode = Literal[
 ]
 
 _HINTS: Final[dict[TaxonomyCode, str]] = {
+    "cli_startup_error": (
+        "Pipeline subprocess exited with a non-zero code before writing ANY log "
+        "events. The pipeline.log is empty. Most likely cause: argparse rejected "
+        "an unknown CLI argument (returncode=2) — e.g. the `update` subcommand "
+        "was missing --config-dir or --ticker. Check src/edx/cli.py: ensure the "
+        "`update` subparser registers all arguments the runner passes."
+    ),
     "discoverer_403_servicepipe": (
         "Discoverer hit ServicePipe (status 403). Verify cookies in "
         "config/app.yaml or switch http_backend to playwright."
@@ -41,6 +52,12 @@ _HINTS: Final[dict[TaxonomyCode, str]] = {
         "Discoverer found zero publications across all 4 type URLs. "
         "The e_disclosure_id may be invalid; cross-check via "
         "tools/find_e_disclosure_ids.py."
+    ),
+    "no_recent_publications": (
+        "Discoverer found publications on the website but all predate the "
+        "backfill cutoff — company is likely inactive/defunct. The bootstrap "
+        "fix (discoverer _BOOTSTRAP_CUTOFF) will import its full archive on "
+        "the next tick. If still neutral after that, consider manual_blacklist."
     ),
     "period_unparseable": (
         "Discoverer reached the listing but could not parse "
@@ -56,6 +73,22 @@ _HINTS: Final[dict[TaxonomyCode, str]] = {
         "Text Extractor returned <1000 chars. Tesseract DPI/PSM may "
         "be off, vision_fallback may be needed (Patch 33), or the "
         "document is encrypted/empty."
+    ),
+    "pipeline_timeout": (
+        "Pipeline subprocess was killed (returncode=-1) before reaching the "
+        "Metric Extractor stage. Text extraction completed but metric "
+        "extraction never ran. Fix: raise DEFAULT_PIPELINE_TIMEOUT_S in "
+        "src/edx/evolve/tick.py so large bootstrapping batches (many OCR "
+        "publications) have enough wall-time to finish."
+    ),
+    "oom_kill": (
+        "Pipeline subprocess was killed by the OS OOM killer (returncode=-9) "
+        "during text extraction. Before Patch 80, convert_from_path rendered "
+        "ALL pages of a PDF into RAM simultaneously at 400 DPI — a 100-page "
+        "document consumed ~4.6 GB peak. The fix (Patch 80) in "
+        "src/edx/stages/text_extractor/ocr/tesseract.py processes pages one "
+        "at a time (first_page/last_page), bounding peak memory to ~46 MB per "
+        "page. Do NOT revert to bulk convert_from_path — it will OOM again."
     ),
     "metric_coverage_zero": (
         "Metric Extractor processed the doc but extracted 0 metrics. "
@@ -108,17 +141,22 @@ def classify_failures(
     log_path: Path,
     state_slice: dict[str, dict[str, object]],
     failing_tickers: list[str],
+    pipeline_returncode: int = 0,
 ) -> list[TaxonomyEntry]:
     """Return one entry per failing ticker (in input order).
 
     ``state_slice`` is a mapping ``ticker → {publications, documents,
     metrics, qa_issues}`` produced by :mod:`edx.evolve.bundle`.
+    ``pipeline_returncode`` is the exit code of the pipeline subprocess
+    (0 if unknown); used to distinguish OOM kills (-9) from timeouts (-1).
     """
     log_lines = _read_log_lines(log_path)
     out: list[TaxonomyEntry] = []
     for ticker in failing_tickers:
         slice_for_ticker = state_slice.get(ticker, {})
-        code, evidence = _classify_one(ticker, log_lines, slice_for_ticker)
+        code, evidence = _classify_one(
+            ticker, log_lines, slice_for_ticker, pipeline_returncode
+        )
         out.append(
             TaxonomyEntry(
                 ticker=ticker,
@@ -153,6 +191,7 @@ def _classify_one(
     ticker: str,
     log_lines: list[dict[str, object]],
     slice_for_ticker: dict[str, object],
+    pipeline_returncode: int = 0,
 ) -> tuple[TaxonomyCode, tuple[str, ...]]:
     """Return (code, up-to-5 evidence strings) for a single ticker.
 
@@ -168,6 +207,23 @@ def _classify_one(
         for line in log_lines
         if isinstance(line.get("ticker"), str) and line["ticker"] == ticker
     ]
+
+    # 0. Pipeline never wrote any log events — subprocess crashed at startup
+    #    before configure()/logging was initialised.  Argparse exits with
+    #    code 2 when an unknown argument is passed (e.g. `update` subparser
+    #    missing --config-dir / --ticker); ImportErrors and missing config
+    #    dirs also land here.  The signal is: no global log lines at all AND
+    #    the state slice for this ticker is completely empty (no publications,
+    #    no documents) — nothing was processed.
+    if (
+        not log_lines
+        and not slice_for_ticker.get("publications")
+        and not slice_for_ticker.get("documents")
+    ):
+        return "cli_startup_error", (
+            f"pipeline.log empty for {ticker}; no publications or documents in state — "
+            "subprocess exited before writing any log events",
+        )
 
     # 1. ServicePipe 403 — dominant signal.
     sp_lines = [
@@ -193,6 +249,21 @@ def _classify_one(
         )
         return "discoverer_no_publications", evidence
 
+    # 2.5. Company has publications on the website but all predate the cutoff
+    #      (new=0 for every type that found anything). The company is likely
+    #      inactive/defunct. The bootstrap-cutoff fix will pick them up next run.
+    discovered_with_pubs = [
+        line for line in ticker_logs
+        if line.get("event") == "ticker_type_discovered"
+        and _safe_int(line.get("found")) > 0
+    ]
+    all_new_zero = bool(discovered_with_pubs) and all(
+        _safe_int(line.get("new")) == 0 for line in discovered_with_pubs
+    )
+    pubs_empty = not slice_for_ticker.get("publications")
+    if all_new_zero and pubs_empty:
+        return "no_recent_publications", _trim_evidence(discovered_with_pubs)
+
     # 3. UNIQUE constraint failures from metric extractor.
     uniq_lines: list[dict[str, object]] = []
     for line in ticker_logs:
@@ -204,14 +275,49 @@ def _classify_one(
     if uniq_lines:
         return "unique_constraint", _trim_evidence(uniq_lines)
 
-    # 4. Period parser stuck.
+    # 4. Period parser stuck.  Only genuine period-related warnings fire this;
+    #    structural row warnings ("row with only N cells") are excluded so they
+    #    don't misclassify inactive-company batches as period failures.
     period_lines = [
         line
         for line in ticker_logs
-        if line.get("event") in {"period_parser_unmatched", "discoverer_parse_warning"}
+        if line.get("event") == "period_parser_unmatched"
+        or (
+            line.get("event") == "discoverer_parse_warning"
+            and "reporting period" in str(line.get("detail", "")).lower()
+        )
     ]
     if period_lines:
         return "period_unparseable", _trim_evidence(period_lines)
+
+    # 4.5. Pipeline killed before metric extraction ran.
+    #      Detects: text extraction events exist for this ticker in the log
+    #      but zero metric_extract_* events — the pipeline was killed after
+    #      the text_extractor stage but before metric_extractor started.
+    #      Distinguishes OOM kill (returncode=-9) from wall-clock timeout
+    #      (returncode=-1).  Default returncode=0 falls back to pipeline_timeout
+    #      for backward compatibility when the caller doesn't supply it.
+    #      metric_extract events use ``publication_id`` not ``ticker``, so we
+    #      match by ``publication_id.startswith(ticker + "-")``.
+    pub_extracted_lines = [
+        line
+        for line in log_lines
+        if line.get("event") == "publication_extracted"
+        and isinstance(line.get("publication_id"), str)
+        and str(line["publication_id"]).startswith(ticker + "-")
+    ]
+    metric_started_lines = [
+        line
+        for line in log_lines
+        if isinstance(line.get("event"), str)
+        and str(line["event"]).startswith("metric_extract")
+        and isinstance(line.get("publication_id"), str)
+        and str(line["publication_id"]).startswith(ticker + "-")
+    ]
+    if pub_extracted_lines and not metric_started_lines:
+        if pipeline_returncode == -9:
+            return "oom_kill", _trim_evidence(pub_extracted_lines[:3])
+        return "pipeline_timeout", _trim_evidence(pub_extracted_lines[:3])
 
     # 5. Coverage signals from state.
     metrics_rows = _safe_int(slice_for_ticker.get("metrics_count"))

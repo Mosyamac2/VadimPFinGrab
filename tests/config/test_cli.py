@@ -152,3 +152,30 @@ def test_cli_help_lists_config_subcommand(flag: str) -> None:
     assert "config" in result.stdout
     assert "update" in result.stdout
     assert "run" in result.stdout
+
+
+def test_cli_update_accepts_ticker_flag(tmp_path: Path) -> None:
+    """edx update --ticker X must not fail with returncode=2 (argparse rejection)."""
+    cfg_dir = _make_isolated_workspace_for_orchestrator(tmp_path)
+    result = _run_cli(
+        ["--config-dir", str(cfg_dir), "update", "--ticker", "SBER"],
+        env={"ANTHROPIC_API_KEY": "fake-key-for-test"},
+    )
+    # returncode=2 means argparse rejected the argument — the bug this test guards.
+    assert result.returncode != 2, (
+        f"edx update rejected --ticker; stderr: {result.stderr!r}"
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_cli_update_accepts_config_dir_after_subcommand(tmp_path: Path) -> None:
+    """edx update --config-dir DIR --ticker X (evolve-wrapper order) must work."""
+    cfg_dir = _make_isolated_workspace_for_orchestrator(tmp_path)
+    result = _run_cli(
+        ["update", "--config-dir", str(cfg_dir), "--ticker", "SBER"],
+        env={"ANTHROPIC_API_KEY": "fake-key-for-test"},
+    )
+    assert result.returncode != 2, (
+        f"edx update rejected --config-dir after subcommand; stderr: {result.stderr!r}"
+    )
+    assert result.returncode == 0, result.stderr or result.stdout

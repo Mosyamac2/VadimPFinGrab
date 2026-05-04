@@ -204,26 +204,29 @@ class UnpackerService:
     def _extract_zip(self, archive: Path, target_dir: Path) -> None:
         target_resolved = target_dir.resolve()
         total_bytes = 0
-        with zipfile.ZipFile(archive, "r") as zf:
-            for member in zf.infolist():
-                if member.is_dir():
-                    continue
-                self._validate_member_path(member.filename, archive)
-                total_bytes += member.file_size
-                if total_bytes > self.max_unpacked_bytes:
-                    raise UnpackerError(
-                        f"{archive.name}: uncompressed size exceeds "
-                        f"{self.max_unpacked_bytes // (1024 * 1024)} MB cap"
-                    )
-                dest = (target_dir / member.filename).resolve()
-                if not _is_inside(dest, target_resolved):
-                    raise UnpackerError(
-                        f"{archive.name}: zip member would escape target dir: "
-                        f"{member.filename!r}"
-                    )
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                with zf.open(member) as src, open(dest, "wb") as dst:
-                    shutil.copyfileobj(src, dst)
+        try:
+            with zipfile.ZipFile(archive, "r") as zf:
+                for member in zf.infolist():
+                    if member.is_dir():
+                        continue
+                    self._validate_member_path(member.filename, archive)
+                    total_bytes += member.file_size
+                    if total_bytes > self.max_unpacked_bytes:
+                        raise UnpackerError(
+                            f"{archive.name}: uncompressed size exceeds "
+                            f"{self.max_unpacked_bytes // (1024 * 1024)} MB cap"
+                        )
+                    dest = (target_dir / member.filename).resolve()
+                    if not _is_inside(dest, target_resolved):
+                        raise UnpackerError(
+                            f"{archive.name}: zip member would escape target dir: "
+                            f"{member.filename!r}"
+                        )
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(member) as src, open(dest, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+        except (zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
+            raise UnpackerError(f"{archive.name}: zip extraction failed: {exc}") from exc
 
     def _extract_rar(self, archive: Path, target_dir: Path) -> None:
         try:

@@ -136,6 +136,27 @@ def test_needs_retry_passing_text_does_not_trigger() -> None:
     assert provider._needs_retry(text) is False
 
 
+def _patch_tesseract_one_page(
+    monkeypatch: pytest.MonkeyPatch,
+    tesseract_module: object,
+    fake_image_to_string: object,
+) -> None:
+    """Wire up a single-page PDF mock for the page-by-page OCR path."""
+    import edx.stages.text_extractor.ocr.tesseract as _mod
+    monkeypatch.setattr(_mod.shutil, "which", lambda _: "/bin/x")
+    monkeypatch.setattr(
+        _mod, "pdfinfo_from_path", lambda _path: {"Pages": 1}
+    )
+    monkeypatch.setattr(
+        _mod,
+        "convert_from_path",
+        lambda _path, dpi, first_page, last_page: [object()],
+    )
+    monkeypatch.setattr(
+        _mod.pytesseract, "image_to_string", fake_image_to_string
+    )
+
+
 def test_retry_chosen_when_better(monkeypatch: pytest.MonkeyPatch) -> None:
     """Primary returns 50 chars, retry returns 200 → final = retry."""
     import edx.stages.text_extractor.ocr.tesseract as tesseract_module
@@ -146,17 +167,7 @@ def test_retry_chosen_when_better(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_image_to_string(_image, *, lang, config):  # type: ignore[no-untyped-def]
         return retry if "--psm 4" in config else primary
 
-    monkeypatch.setattr(
-        tesseract_module.pytesseract,
-        "image_to_string",
-        fake_image_to_string,
-    )
-    monkeypatch.setattr(tesseract_module.shutil, "which", lambda _: "/bin/x")
-    monkeypatch.setattr(
-        tesseract_module,
-        "convert_from_path",
-        lambda _path, dpi: [object()],  # one fake image
-    )
+    _patch_tesseract_one_page(monkeypatch, tesseract_module, fake_image_to_string)
 
     provider = TesseractOCRProvider(
         psm=6, retry_psm=4, retry_min_chars=100, retry_min_digit_ratio=0.0
@@ -177,17 +188,7 @@ def test_retry_not_chosen_when_not_better(
     def fake_image_to_string(_image, *, lang, config):  # type: ignore[no-untyped-def]
         return retry if "--psm 4" in config else primary
 
-    monkeypatch.setattr(
-        tesseract_module.pytesseract,
-        "image_to_string",
-        fake_image_to_string,
-    )
-    monkeypatch.setattr(tesseract_module.shutil, "which", lambda _: "/bin/x")
-    monkeypatch.setattr(
-        tesseract_module,
-        "convert_from_path",
-        lambda _path, dpi: [object()],
-    )
+    _patch_tesseract_one_page(monkeypatch, tesseract_module, fake_image_to_string)
 
     provider = TesseractOCRProvider(
         psm=6, retry_psm=4, retry_min_chars=100, retry_min_digit_ratio=0.0
@@ -208,21 +209,47 @@ def test_retry_disabled_when_retry_psm_is_none(
         calls.append(config)
         return "bad"  # short → would trigger retry
 
-    monkeypatch.setattr(
-        tesseract_module.pytesseract,
-        "image_to_string",
-        fake_image_to_string,
-    )
-    monkeypatch.setattr(tesseract_module.shutil, "which", lambda _: "/bin/x")
-    monkeypatch.setattr(
-        tesseract_module,
-        "convert_from_path",
-        lambda _path, dpi: [object()],
-    )
+    _patch_tesseract_one_page(monkeypatch, tesseract_module, fake_image_to_string)
 
     provider = TesseractOCRProvider(psm=6, retry_psm=None)
     provider.recognize(Path("/fake.pdf"), ["rus"])
     assert calls == ["--psm 6"]  # exactly one call, no retry
+
+
+def test_recognize_processes_pages_one_at_a_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """convert_from_path must be called once per page, not once for all pages."""
+    import edx.stages.text_extractor.ocr.tesseract as tesseract_module
+
+    convert_calls: list[dict[str, int]] = []
+
+    def fake_convert(_path, dpi, first_page, last_page):  # type: ignore[no-untyped-def]
+        convert_calls.append({"first_page": first_page, "last_page": last_page})
+        return [object()]
+
+    monkeypatch.setattr(tesseract_module.shutil, "which", lambda _: "/bin/x")
+    monkeypatch.setattr(
+        tesseract_module,
+        "pdfinfo_from_path",
+        lambda _path: {"Pages": 3},  # simulate 3-page PDF
+    )
+    monkeypatch.setattr(tesseract_module, "convert_from_path", fake_convert)
+    monkeypatch.setattr(
+        tesseract_module.pytesseract,
+        "image_to_string",
+        lambda _img, **kw: "text",
+    )
+
+    provider = TesseractOCRProvider(psm=6, retry_psm=None)
+    pages = provider.recognize(Path("/fake.pdf"), ["rus"])
+
+    # One convert_from_path call per page, each requesting exactly one page
+    assert len(convert_calls) == 3
+    assert convert_calls[0] == {"first_page": 1, "last_page": 1}
+    assert convert_calls[1] == {"first_page": 2, "last_page": 2}
+    assert convert_calls[2] == {"first_page": 3, "last_page": 3}
+    assert len(pages) == 3
 
 
 @requires_tesseract

@@ -41,8 +41,13 @@ def compute_verdict(
       - metrics_after < metrics_before → ``regression``.
       - publications_written_delta < 0 → ``regression`` (a previously
         ``written`` row decayed to ``failed`` / ``skipped``).
-      - metrics_delta >= ``min_metrics_for_ok`` AND
-        publications_written_delta >= 0 → ``ok``.
+      - metrics_delta >= 0 AND publications_written_delta >= 0 AND
+        (metrics_delta >= ``min_metrics_for_ok`` OR
+         after.metrics_rows >= ``min_metrics_for_ok``) → ``ok``.
+        The second branch handles already-healthy companies: if a ticker
+        already has enough metrics and nothing regressed this tick it is
+        still "ok" — not "neutral" — so the Picker respects its cooldown
+        and does not re-select it on every subsequent tick.
       - otherwise → ``neutral`` (no harm, no benefit yet).
     """
     if before.ticker != after.ticker:
@@ -71,7 +76,14 @@ def compute_verdict(
         code = "fail"
     elif metrics_delta < 0 or written_delta < 0:
         code = "regression"
-    elif metrics_delta >= min_metrics_for_ok and written_delta >= 0:
+    elif (
+        metrics_delta >= 0
+        and written_delta >= 0
+        and (
+            metrics_delta >= min_metrics_for_ok
+            or after.metrics_rows >= min_metrics_for_ok
+        )
+    ):
         code = "ok"
     else:
         code = "neutral"
