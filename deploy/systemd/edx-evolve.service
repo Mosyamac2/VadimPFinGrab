@@ -32,7 +32,7 @@ EnvironmentFile=-/opt/edx/.env.proxy
 ExecStart=/usr/bin/flock -n /tmp/edx-evolve.lock /opt/edx/.venv/bin/edx evolve tick
 User=edx
 Group=edx
-TimeoutStartSec=3h
+TimeoutStartSec=13h
 # Allow the npm-installed claude binary on PATH.
 Environment="PATH=/usr/local/bin:/usr/bin:/bin"
 Nice=10
