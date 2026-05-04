@@ -46,13 +46,15 @@ DEFAULT_CSV_PATH: Final[Path] = Path("e-disclosure-companies.csv")
 DEFAULT_MAIN_TICKERS_YAML: Final[Path] = Path("config/tickers.yaml")
 DEFAULT_EVOLVE_CONFIG_DIR: Final[Path] = Path("config-evolve")
 DEFAULT_BUNDLE_ROOT: Final[Path] = Path("evolution/runs")
-DEFAULT_PIPELINE_TIMEOUT_S: Final[int] = 30 * 60
+DEFAULT_PIPELINE_TIMEOUT_S: Final[int] = 90 * 60
 
 DEFAULT_TICK_BUDGET_USD: Final[float] = 100.0
 DEFAULT_DAILY_BUDGET_USD: Final[float] = 1000.0
+DEFAULT_BATCH_SIZE: Final[int] = 3
 AGENT_ENABLED_ENV: Final[str] = "EDX_EVOLVE_AGENT_ENABLED"
 TICK_BUDGET_ENV: Final[str] = "EDX_EVOLVE_TICK_BUDGET_USD"
 DAILY_BUDGET_ENV: Final[str] = "EDX_EVOLVE_DAILY_BUDGET_USD"
+BATCH_SIZE_ENV: Final[str] = "EDX_EVOLVE_BATCH_SIZE"
 
 
 def _env_float(name: str, default: float) -> float:
@@ -61,6 +63,17 @@ def _env_float(name: str, default: float) -> float:
         return default
     try:
         return float(raw)
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+        return value if value > 0 else default
     except ValueError:
         return default
 
@@ -114,7 +127,7 @@ def run_one_tick(
     evolve_config_dir: Path = DEFAULT_EVOLVE_CONFIG_DIR,
     bundle_root: Path = DEFAULT_BUNDLE_ROOT,
     cooldown_days: int = 7,
-    batch_size: int = 3,
+    batch_size: int | None = None,
     pipeline_timeout_s: int = DEFAULT_PIPELINE_TIMEOUT_S,
 ) -> int:
     """Run one self-evolve tick. Returns ``tick_id`` or ``0`` if no batch.
@@ -124,6 +137,9 @@ def run_one_tick(
     later post-mortem; Patch 42 will pick it up and run the agent.
     """
     log = get_logger("edx.evolve.tick")
+
+    if batch_size is None:
+        batch_size = _env_int(BATCH_SIZE_ENV, DEFAULT_BATCH_SIZE)
 
     companies = load_companies(csv_path)
     moex_ids = read_moex_e_disclosure_ids(main_tickers_yaml)

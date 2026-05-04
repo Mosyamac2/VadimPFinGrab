@@ -187,6 +187,47 @@ def test_run_one_tick_records_baseline(monkeypatch, tmp_path: Path) -> None:
     assert (bundle / "batch.json").exists()
 
 
+def test_run_one_tick_honours_batch_size_env(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """``EDX_EVOLVE_BATCH_SIZE`` env var (loaded by systemd from
+    ``/opt/edx/.env.evolve``) lets the operator drop batch size below
+    the default of 3 — necessary on memory-constrained hosts where
+    parallel processing of 3 defunct-company archive bootstraps OOM-kills
+    the service. Anti-regression for production tick #79 OOM (May 4)."""
+    proj, cfg, csv = _setup_project(tmp_path)
+
+    captured: dict[str, list[str]] = {}
+
+    def fake_runner(tickers, **kw):  # type: ignore[no-untyped-def]
+        captured["tickers"] = list(tickers)
+        log = kw["log_path"]
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text("", encoding="utf-8")
+        return PipelineRunResult(
+            returncode=0,
+            duration_seconds=0.1,
+            stdout_tail="",
+            stderr_tail="",
+            log_path=log,
+        )
+
+    monkeypatch.setattr(tick_module, "run_pipeline_on_batch", fake_runner)
+    monkeypatch.setenv(tick_module.BATCH_SIZE_ENV, "1")
+
+    settings = load_all(cfg)
+    tick_module.run_one_tick(
+        settings,
+        csv_path=csv,
+        main_tickers_yaml=cfg / "tickers.yaml",
+        evolve_config_dir=proj / "config-evolve",
+        bundle_root=proj / "evolution" / "runs",
+    )
+    assert captured["tickers"] == ["EDX1"], (
+        f"expected single ticker, got {captured['tickers']!r}"
+    )
+
+
 def test_run_one_tick_skips_moex_overlap(monkeypatch, tmp_path: Path) -> None:
     """A company id present in main config/tickers.yaml is excluded."""
     proj, cfg, _csv = _setup_project(tmp_path)
