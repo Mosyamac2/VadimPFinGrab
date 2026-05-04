@@ -112,9 +112,31 @@ working on the same step, STOP — let the wrapper rollback.
 
 # STEP 4 — MANDATORY: update `evolution/MEMORY.md`
 
-Append a new entry under `## Patches log (reverse-chronological)`:
+Append a new entry under `## Patches log (reverse-chronological)`. The
+header line MUST be EXACTLY:
 
-    ### evolve($1) — {today's date YYYY-MM-DD} — {failure_class}
+    ### evolve($1) — YYYY-MM-DD — failure_class
+
+The literal characters `evolve($1)` mean: write the LITERAL tick number
+`$1` between the parentheses. Treat $1 as the actual integer tick id
+that's already substituted for you in this prompt — type it out as a
+number. Do NOT leave the parentheses empty.
+
+**WRONG** (will trigger ``memory_not_updated`` rollback):
+
+    ### evolve() — 2026-05-04 — defunct_company_bootstrap
+
+**RIGHT**:
+
+    ### evolve($1) — 2026-05-04 — defunct_company_bootstrap
+
+The gate enforces the regex
+``^###\s+evolve\(\d+\)\s+—\s+\d{4}-\d{2}-\d{2}\s+—\s+`` on the new
+section. Any deviation (empty parens, missing date, missing
+em-dash, wrong unicode dash) rolls back the entire tick.
+
+After the header, fill in the body:
+
     - **Tick:** #$1 — batch [{ticker1}, {ticker2}, {ticker3}]
     - **Failing companies:** {list}
     - **Root cause:** {one paragraph}
