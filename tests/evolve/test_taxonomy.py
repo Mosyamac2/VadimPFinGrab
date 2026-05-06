@@ -42,10 +42,77 @@ def test_classify_no_publications_for_all_4_types(tmp_path: Path) -> None:
                 "level": "info",
                 "ticker": "EDX1",
                 "type_code": tc,
+                "status": 200,
             }
             for tc in (2, 3, 4, 5)
         ],
     )
+    out = classify_failures(log, state_slice={"EDX1": {}}, failing_tickers=["EDX1"])
+    assert out[0].code == "discoverer_no_publications"
+
+
+def test_classify_discoverer_id_not_found_when_all_404(tmp_path: Path) -> None:
+    log = tmp_path / "p.log"
+    _write_log(
+        log,
+        [
+            {
+                "event": "discoverer_no_publications_for_type",
+                "level": "info",
+                "ticker": "EDX1",
+                "type_code": tc,
+                "status": 404,
+            }
+            for tc in (2, 3, 4, 5)
+        ],
+    )
+    out = classify_failures(log, state_slice={"EDX1": {}}, failing_tickers=["EDX1"])
+    assert out[0].code == "discoverer_id_not_found"
+    assert "404" in out[0].evidence[0]
+
+
+def test_classify_discoverer_id_not_found_when_all_410(tmp_path: Path) -> None:
+    log = tmp_path / "p.log"
+    _write_log(
+        log,
+        [
+            {
+                "event": "discoverer_no_publications_for_type",
+                "level": "info",
+                "ticker": "EDX1",
+                "type_code": tc,
+                "status": 410,
+            }
+            for tc in (2, 3, 4, 5)
+        ],
+    )
+    out = classify_failures(log, state_slice={"EDX1": {}}, failing_tickers=["EDX1"])
+    assert out[0].code == "discoverer_id_not_found"
+
+
+def test_classify_no_publications_when_mixed_status(tmp_path: Path) -> None:
+    """Three 404s and one 200 should classify as discoverer_no_publications."""
+    log = tmp_path / "p.log"
+    lines = [
+        {
+            "event": "discoverer_no_publications_for_type",
+            "level": "info",
+            "ticker": "EDX1",
+            "type_code": tc,
+            "status": 404,
+        }
+        for tc in (2, 3, 4)
+    ]
+    lines.append(
+        {
+            "event": "discoverer_no_publications_for_type",
+            "level": "info",
+            "ticker": "EDX1",
+            "type_code": 5,
+            "status": 200,
+        }
+    )
+    _write_log(log, lines)
     out = classify_failures(log, state_slice={"EDX1": {}}, failing_tickers=["EDX1"])
     assert out[0].code == "discoverer_no_publications"
 
@@ -465,6 +532,224 @@ def test_classify_skips_malformed_lines(tmp_path: Path) -> None:
     assert out[0].code == "discoverer_403_servicepipe"
 
 
+def test_classify_llm_arg_too_long(tmp_path: Path) -> None:
+    """metric_extract_llm_unavailable with 'Argument list too long' in error
+    → llm_arg_too_long, not llm_credits_exhausted."""
+    log = tmp_path / "p.log"
+    _write_log(
+        log,
+        [
+            {
+                "event": "metric_extract_llm_unavailable",
+                "level": "error",
+                "publication_id": "EDX1-3-194054",
+                "error": (
+                    "claude_code: cannot spawn '/usr/bin/claude': "
+                    "[Errno 7] Argument list too long: '/usr/bin/claude'"
+                ),
+            }
+        ],
+    )
+    state_slice = {
+        "EDX1": {
+            "documents": [{"is_machine_readable": 1, "reporting_standard": "RSBU"}],
+            "metrics_count": 0,
+            "qa_issues": [],
+        }
+    }
+    out = classify_failures(log, state_slice=state_slice, failing_tickers=["EDX1"])
+    assert out[0].code == "llm_arg_too_long"
+    assert out[0].evidence
+
+
+def test_classify_llm_arg_too_long_takes_precedence_over_llm_credits_exhausted(
+    tmp_path: Path,
+) -> None:
+    """Rule 4.65 must fire before rule 4.75 when 'Argument list too long' is present."""
+    log = tmp_path / "p.log"
+    _write_log(
+        log,
+        [
+            {
+                "event": "metric_extract_llm_unavailable",
+                "level": "error",
+                "publication_id": "EDX1-3-194054",
+                "error": (
+                    "claude_code: cannot spawn '/usr/bin/claude': "
+                    "[Errno 7] Argument list too long"
+                ),
+            },
+            {
+                "event": "metric_extract_llm_unavailable",
+                "level": "error",
+                "publication_id": "EDX1-4-9999",
+                "error": "openrouter HTTP 402: Insufficient credits",
+            },
+        ],
+    )
+    state_slice = {
+        "EDX1": {
+            "documents": [{"is_machine_readable": 1, "reporting_standard": "RSBU"}],
+            "metrics_count": 0,
+            "qa_issues": [],
+        }
+    }
+    out = classify_failures(log, state_slice=state_slice, failing_tickers=["EDX1"])
+    assert out[0].code == "llm_arg_too_long"
+
+
+def test_classify_llm_credits_exhausted(tmp_path: Path) -> None:
+    """metric_extract_llm_unavailable events for the ticker → llm_credits_exhausted,
+    not metric_coverage_zero (which would suggest 'extend synonyms' unhelpfully)."""
+    log = tmp_path / "p.log"
+    _write_log(
+        log,
+        [
+            {
+                "event": "metric_extract_llm_unavailable",
+                "level": "error",
+                "publication_id": "EDX1-3-999",
+                "error": "openrouter HTTP 402: Insufficient credits",
+            },
+            {
+                "event": "metric_extract_llm_unavailable",
+                "level": "error",
+                "publication_id": "EDX1-4-888",
+                "error": "openrouter HTTP 402: Insufficient credits",
+            },
+            {
+                "event": "llm_chain_exhausted",
+                "level": "error",
+                "last_provider": "openrouter",
+                "error": "openrouter HTTP 402: Insufficient credits",
+            },
+        ],
+    )
+    state_slice = {
+        "EDX1": {
+            "documents": [{"is_machine_readable": 1, "reporting_standard": "RSBU"}],
+            "metrics_count": 0,
+            "qa_issues": [],
+        }
+    }
+    out = classify_failures(log, state_slice=state_slice, failing_tickers=["EDX1"])
+    assert out[0].code == "llm_credits_exhausted"
+    assert out[0].evidence  # shows which publications failed
+
+
+def test_classify_llm_credits_exhausted_does_not_smear_across_tickers(
+    tmp_path: Path,
+) -> None:
+    """llm_unavailable events for EDX1 must not classify EDX2 as llm_credits_exhausted."""
+    log = tmp_path / "p.log"
+    _write_log(
+        log,
+        [
+            {
+                "event": "metric_extract_llm_unavailable",
+                "level": "error",
+                "publication_id": "EDX1-3-999",
+                "error": "openrouter HTTP 402: Insufficient credits",
+            },
+        ],
+    )
+    state_slice = {
+        "EDX1": {"documents": [{"is_machine_readable": 1}], "metrics_count": 0, "qa_issues": []},
+        "EDX2": {"documents": [{"is_machine_readable": 1}], "metrics_count": 0, "qa_issues": []},
+    }
+    out = classify_failures(
+        log, state_slice=state_slice, failing_tickers=["EDX1", "EDX2"]
+    )
+    assert out[0].code == "llm_credits_exhausted"
+    assert out[1].code != "llm_credits_exhausted"
+
+
+_LLM_402_ERR = "openrouter HTTP 402: Insufficient credits"
+
+
+def test_classify_llm_failed_stuck(tmp_path: Path) -> None:
+    """Publications stuck in 'failed' status with HTTP 402 and no
+    metric_extract_* events in the log → llm_failed_stuck (not unknown).
+    This happens when a prior run marked publications as 'failed' on
+    LLMUnavailableError; the metric_extractor skips them on every subsequent
+    run because it only processes 'extracted' publications."""
+    log = tmp_path / "p.log"
+    # The pipeline ran (discoverer events present) but metric_extractor never
+    # fired (no metric_extract_* events) because all publications were already
+    # in 'failed' status.
+    _write_log(
+        log,
+        [
+            {
+                "ticker": "EDX1",
+                "event": "ticker_type_discovered",
+                "level": "info",
+                "found": 10,
+                "new": 0,
+                "inserted": 0,
+            },
+        ],
+    )
+    state_slice = {
+        "EDX1": {
+            "publications": [
+                {
+                    "publication_id": "EDX1-3-100",
+                    "status": "failed",
+                    "last_error": _LLM_402_ERR,
+                },
+                {
+                    "publication_id": "EDX1-4-101",
+                    "status": "failed",
+                    "last_error": _LLM_402_ERR,
+                },
+            ],
+            "metrics_count": 0,
+            "qa_issues": [],
+        }
+    }
+    out = classify_failures(log, state_slice=state_slice, failing_tickers=["EDX1"])
+    assert out[0].code == "llm_failed_stuck"
+    assert out[0].evidence  # lists the stuck publication IDs
+
+
+def test_classify_llm_failed_stuck_does_not_fire_when_metric_extract_ran(
+    tmp_path: Path,
+) -> None:
+    """If metric_extract_* events exist in the log (extractor DID run this
+    tick), do NOT classify as llm_failed_stuck — the live HTTP 402 is
+    better described by llm_credits_exhausted."""
+    log = tmp_path / "p.log"
+    _write_log(
+        log,
+        [
+            {
+                "event": "metric_extract_llm_unavailable",
+                "level": "error",
+                "publication_id": "EDX1-3-100",
+                "error": _LLM_402_ERR,
+            },
+        ],
+    )
+    state_slice = {
+        "EDX1": {
+            "publications": [
+                {
+                    "publication_id": "EDX1-3-100",
+                    "status": "failed",
+                    "last_error": _LLM_402_ERR,
+                },
+            ],
+            "metrics_count": 0,
+            "qa_issues": [],
+        }
+    }
+    out = classify_failures(log, state_slice=state_slice, failing_tickers=["EDX1"])
+    # metric_extract_llm_unavailable is present → llm_credits_exhausted wins,
+    # not llm_failed_stuck (even though state_slice also shows failed pubs).
+    assert out[0].code == "llm_credits_exhausted"
+
+
 def test_classify_returns_one_entry_per_ticker(tmp_path: Path) -> None:
     log = tmp_path / "p.log"
     _write_log(
@@ -487,3 +772,73 @@ def test_classify_returns_one_entry_per_ticker(tmp_path: Path) -> None:
     assert out[0].code == "discoverer_403_servicepipe"
     # EDX2 has nothing → unknown.
     assert out[1].code == "unknown"
+
+
+def test_classify_all_terminal_no_metrics(tmp_path: Path) -> None:
+    """All publications in {written, skipped} with 0 metrics → all_terminal_no_metrics.
+
+    Models EDX20321: 19 written (RSBU scans, LLM found 0 metrics) + 27 skipped
+    (type-2 annual reports, no IFRS/RSBU/ISSUER docs in the publication).
+    """
+    log = tmp_path / "p.log"
+    _write_log(
+        log,
+        [
+            {
+                "ticker": "EDX20321",
+                "event": "ticker_type_discovered",
+                "level": "info",
+                "found": 19,
+                "new": 0,
+                "inserted": 0,
+            },
+        ],
+    )
+    state_slice = {
+        "EDX20321": {
+            "publications": [
+                {"publication_id": "EDX20321-3-1", "status": "written"},
+                {"publication_id": "EDX20321-3-2", "status": "written"},
+                {"publication_id": "EDX20321-2-3", "status": "skipped"},
+                {"publication_id": "EDX20321-2-4", "status": "skipped"},
+            ],
+            "documents": [
+                {"document_id": 1, "is_machine_readable": 0, "reporting_standard": "RSBU"},
+            ],
+            "metrics_count": 0,
+            "qa_issues": [],
+        }
+    }
+    out = classify_failures(log, state_slice=state_slice, failing_tickers=["EDX20321"])
+    assert out[0].code == "all_terminal_no_metrics"
+    assert "written=2" in out[0].evidence[0]
+    assert "skipped=2" in out[0].evidence[0]
+
+
+def test_classify_all_terminal_no_metrics_takes_precedence_over_metric_coverage_zero(
+    tmp_path: Path,
+) -> None:
+    """all_terminal_no_metrics (rule 4.8) fires before metric_coverage_zero (rule 5).
+
+    Even when there are machine-readable documents (which would normally trigger
+    metric_coverage_zero), if all pubs are in terminal states rule 4.8 wins.
+    """
+    log = tmp_path / "p.log"
+    _write_log(log, [])
+    state_slice = {
+        "EDX1": {
+            "publications": [
+                {"publication_id": "EDX1-3-1", "status": "written"},
+                {"publication_id": "EDX1-2-2", "status": "skipped"},
+            ],
+            "documents": [
+                {"document_id": 1, "is_machine_readable": 1, "reporting_standard": "RSBU"},
+            ],
+            "metrics_count": 0,
+            "qa_issues": [],
+        }
+    }
+    out = classify_failures(log, state_slice=state_slice, failing_tickers=["EDX1"])
+    assert out[0].code == "all_terminal_no_metrics", (
+        f"expected all_terminal_no_metrics, got {out[0].code}"
+    )

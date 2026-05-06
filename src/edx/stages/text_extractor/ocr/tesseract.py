@@ -37,12 +37,14 @@ class TesseractOCRProvider:
         retry_psm: int | None = 4,
         retry_min_chars: int = 80,
         retry_min_digit_ratio: float = 0.05,
+        retry_max_chars: int = 800,
     ) -> None:
         self.dpi = dpi
         self.psm = psm
         self.retry_psm = retry_psm
         self.retry_min_chars = retry_min_chars
         self.retry_min_digit_ratio = retry_min_digit_ratio
+        self.retry_max_chars = retry_max_chars
         self._log = get_logger("edx.stages.text_extractor.ocr.tesseract")
 
     def recognize(
@@ -100,6 +102,11 @@ class TesseractOCRProvider:
         stripped = text.strip()
         if len(stripped) < self.retry_min_chars:
             return True
+        # Long pages (narrative/table content >= retry_max_chars) have
+        # substantial text already. PSM retry provides only ~1% improvement
+        # on such pages at the cost of doubling OCR time — skip it.
+        if len(stripped) >= self.retry_max_chars:
+            return False
         digit_count = sum(1 for c in stripped if c.isdigit())
         return (
             digit_count / max(len(stripped), 1) < self.retry_min_digit_ratio

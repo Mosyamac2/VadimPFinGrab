@@ -225,7 +225,7 @@ class UnpackerService:
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     with zf.open(member) as src, open(dest, "wb") as dst:
                         shutil.copyfileobj(src, dst)
-        except (zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
+        except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError) as exc:
             raise UnpackerError(f"{archive.name}: zip extraction failed: {exc}") from exc
 
     def _extract_rar(self, archive: Path, target_dir: Path) -> None:
@@ -266,7 +266,7 @@ class UnpackerService:
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     with rf.open(member) as src, open(dest, "wb") as dst:
                         shutil.copyfileobj(src, dst)
-        except rarfile.Error as exc:
+        except (rarfile.Error, OSError) as exc:
             raise UnpackerError(f"{archive.name}: rar extraction failed: {exc}") from exc
 
     def _validate_member_path(self, member_name: str, archive: Path) -> None:

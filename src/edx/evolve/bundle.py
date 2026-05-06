@@ -65,11 +65,6 @@ def assemble(
     """
     bundle_dir.mkdir(parents=True, exist_ok=True)
 
-    failing_tickers = [
-        t for t, v in verdicts.items()
-        if v.code in ("fail", "regression")
-    ]
-
     # 1. batch.json — overwrite Patch 40 minimal version with verdict-aware payload.
     batch_payload = [
         {
@@ -94,7 +89,8 @@ def assemble(
     # 3. pipeline.log might be giant — keep only the last MAX_LOG_LINES.
     _cap_log_tail(log_path, MAX_LOG_LINES)
 
-    # 4. state-slice (per-ticker query).
+    # 4. state-slice (per-ticker query). Built before failing_tickers so we
+    #    can detect the llm_failed_stuck pattern for neutral tickers.
     tickers = [c.synthetic_ticker for c in batch]
     state_slice = _build_state_slice(conn, tickers)
     (bundle_dir / "state-slice.json").write_text(
@@ -102,6 +98,20 @@ def assemble(
         encoding="utf-8",
     )
     _render_state_slice_text(state_slice, bundle_dir / "state-slice.txt")
+
+    # Neutral tickers whose publications are permanently stuck in 'failed'
+    # due to HTTP 402 also need taxonomy classification so the agent sees
+    # the llm_failed_stuck hint and knows to apply the reset fix.
+    # Neutral tickers with zero publications (e.g., portal returned 404 for
+    # all types — invalid e_disclosure_id) also need classification so the
+    # agent sees the discoverer_no_publications hint.
+    failing_tickers = [
+        t for t, v in verdicts.items()
+        if v.code in ("fail", "regression")
+        or (v.code == "neutral" and _has_llm_stuck_publications(state_slice, t))
+        or (v.code == "neutral" and _has_zero_publications(state_slice, t))
+        or (v.code == "neutral" and _has_written_no_metrics_publications(state_slice, t))
+    ]
 
     # 5. taxonomy.
     pipeline_rc = _extract_pipeline_returncode(verdicts)
@@ -162,6 +172,72 @@ def assemble(
         encoding="utf-8",
     )
     return manifest
+
+
+def _has_llm_stuck_publications(
+    state_slice: dict[str, dict[str, object]], ticker: str
+) -> bool:
+    """True when the ticker has publications permanently stuck in 'failed'
+    status due to a prior HTTP 402 (LLM credits exhausted) run.
+
+    Used to include neutral tickers in ``failing_tickers`` so the taxonomy
+    classifier surfaces the ``llm_failed_stuck`` hint instead of silently
+    skipping the company.
+    """
+    pubs = state_slice.get(ticker, {}).get("publications", [])
+    if not isinstance(pubs, list):
+        return False
+    return any(
+        isinstance(p, dict)
+        and p.get("status") == "failed"
+        and isinstance(p.get("last_error"), str)
+        and "HTTP 402" in str(p["last_error"])
+        for p in pubs
+    )
+
+
+def _has_written_no_metrics_publications(
+    state_slice: dict[str, dict[str, object]], ticker: str
+) -> bool:
+    """True when all publications are in terminal states but 0 metrics extracted.
+
+    Two terminal states are considered:
+    - ``written``: the metric extractor ran the LLM but found 0 metrics
+      (e.g. accounting policies, scanned RSBU reports with poor OCR quality).
+    - ``skipped``: the metric extractor found no IFRS/RSBU/ISSUER documents
+      in the publication (e.g. annual reports or appendices without financial
+      statement tables).
+
+    Including these tickers in failing_tickers ensures the taxonomy classifier
+    fires ``all_terminal_no_metrics`` (or a more specific code such as
+    ``llm_arg_too_long``) so the agent has a starting hypothesis.
+    """
+    slice_ = state_slice.get(ticker, {})
+    pubs = slice_.get("publications", [])
+    if not isinstance(pubs, list) or not pubs:
+        return False
+    _terminal = {"written", "skipped"}
+    all_terminal = all(
+        isinstance(p, dict) and p.get("status") in _terminal for p in pubs
+    )
+    metrics_count = slice_.get("metrics_count", 0)
+    if not isinstance(metrics_count, int):
+        metrics_count = 0
+    return all_terminal and metrics_count == 0
+
+
+def _has_zero_publications(
+    state_slice: dict[str, dict[str, object]], ticker: str
+) -> bool:
+    """True when the ticker has no publications at all in the state slice.
+
+    Used to include neutral tickers that the discoverer never bootstrapped
+    (e.g., the portal returned 404 for all type URLs, or the e_disclosure_id
+    is invalid) in ``failing_tickers`` so the taxonomy classifier fires
+    ``discoverer_no_publications`` and the operator sees the actionable hint.
+    """
+    pubs = state_slice.get(ticker, {}).get("publications", [])
+    return isinstance(pubs, list) and len(pubs) == 0
 
 
 def _extract_pipeline_returncode(verdicts: dict[str, TickerVerdict]) -> int:

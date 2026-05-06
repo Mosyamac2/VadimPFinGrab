@@ -44,6 +44,8 @@ def test_no_anthropic_key_raises_with_helpful_message(
 ) -> None:
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("EDX_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     settings = _settings(tmp_path)
     settings.secrets.anthropic_api_key = None
     settings.secrets.openrouter_api_key = None
@@ -51,7 +53,11 @@ def test_no_anthropic_key_raises_with_helpful_message(
         build_llm_provider(settings)
 
 
-def test_anthropic_key_returns_single_provider_cached(tmp_path: Path) -> None:
+def test_anthropic_key_returns_single_provider_cached(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EDX_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     settings = _settings(tmp_path)
     _patch_secrets(settings, anthropic="sk-ant-1")
     provider = build_llm_provider(settings)
@@ -66,6 +72,8 @@ def test_openrouter_key_alone_no_longer_provisions_a_provider(
     OpenRouter key is set and ``ANTHROPIC_API_KEY`` is absent, the
     factory must raise — not silently route to OpenRouter."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("EDX_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     settings = _settings(tmp_path)
     settings.secrets.anthropic_api_key = None
     # Pretend OpenRouter is set; should be ignored.
@@ -143,7 +151,11 @@ def test_unrecognised_env_provider_raises(
         build_llm_provider(settings)
 
 
-def test_cache_disabled_returns_raw_provider(tmp_path: Path) -> None:
+def test_cache_disabled_returns_raw_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EDX_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     settings = _settings(tmp_path)
     _patch_secrets(settings, anthropic="sk-ant")
     # Disable cache via the loaded config.

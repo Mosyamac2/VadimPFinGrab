@@ -54,6 +54,8 @@ def test_edx_update_creates_state_db_and_runs_row(tmp_path: Path) -> None:
 
     env = os.environ.copy()
     env["ANTHROPIC_API_KEY"] = "fake-test-key"
+    env.pop("EDX_LLM_PROVIDER", None)
+    env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
     result = subprocess.run(
         [sys.executable, "-m", "edx.cli", "--config-dir", str(cfg_dir), "update"],
         capture_output=True,
@@ -99,6 +101,8 @@ def test_edx_update_idempotent_second_run(tmp_path: Path) -> None:
 
     env = os.environ.copy()
     env["ANTHROPIC_API_KEY"] = "fake-test-key"
+    env.pop("EDX_LLM_PROVIDER", None)
+    env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
 
     def _run() -> subprocess.CompletedProcess[str]:
         return subprocess.run(

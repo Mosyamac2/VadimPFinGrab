@@ -22,6 +22,7 @@ from typing import Final, Literal
 TaxonomyCode = Literal[
     "cli_startup_error",
     "discoverer_403_servicepipe",
+    "discoverer_id_not_found",
     "discoverer_no_publications",
     "no_recent_publications",
     "period_unparseable",
@@ -29,6 +30,10 @@ TaxonomyCode = Literal[
     "extract_text_too_short",
     "pipeline_timeout",
     "oom_kill",
+    "llm_arg_too_long",
+    "llm_credits_exhausted",
+    "llm_failed_stuck",
+    "all_terminal_no_metrics",
     "metric_coverage_zero",
     "metric_coverage_low",
     "unique_constraint",
@@ -48,10 +53,24 @@ _HINTS: Final[dict[TaxonomyCode, str]] = {
         "Discoverer hit ServicePipe (status 403). Verify cookies in "
         "config/app.yaml or switch http_backend to playwright."
     ),
+    "discoverer_id_not_found": (
+        "All 4 type URLs returned HTTP 404/410 — the e_disclosure_id does not "
+        "exist on the portal. Run tools/find_e_disclosure_ids.py (it respects "
+        "http_backend: playwright to bypass ServicePipe) to search for an "
+        "alternative ID. If no candidates are found, the company is not "
+        "registered on e-disclosure.ru and should be removed from the "
+        "tracked list (e-disclosure-companies.csv)."
+    ),
     "discoverer_no_publications": (
-        "Discoverer found zero publications across all 4 type URLs. "
-        "The e_disclosure_id may be invalid; cross-check via "
-        "tools/find_e_disclosure_ids.py."
+        "Discoverer found zero publications across all 4 type URLs (portal "
+        "returned HTTP 200 but the file table was empty). The company exists "
+        "on the portal but has no filed reports. The e_disclosure_id is valid "
+        "and the pipeline ran cleanly. The verdict is now 'ok' (stable "
+        "no-data state), so the ticker enters the normal cooldown cycle "
+        "and is re-checked every 7+ days rather than re-selected on every "
+        "tick. No code fix is needed. Operator should verify whether the "
+        "company has unfulfilled filing obligations; if it will never file, "
+        "remove it from e-disclosure-companies.csv."
     ),
     "no_recent_publications": (
         "Discoverer found publications on the website but all predate the "
@@ -77,9 +96,15 @@ _HINTS: Final[dict[TaxonomyCode, str]] = {
     "pipeline_timeout": (
         "Pipeline subprocess was killed (returncode=-1) before reaching the "
         "Metric Extractor stage. Text extraction completed but metric "
-        "extraction never ran. Fix: raise DEFAULT_PIPELINE_TIMEOUT_S in "
-        "src/edx/evolve/tick.py so large bootstrapping batches (many OCR "
-        "publications) have enough wall-time to finish."
+        "extraction never ran. Two complementary fixes: "
+        "(1) Raise DEFAULT_PIPELINE_TIMEOUT_S in src/edx/evolve/tick.py so "
+        "large bootstrapping batches have enough wall-time to finish "
+        "(current default: 12 h; systemd TimeoutStartSec=13h is the hard cap). "
+        "(2) If the log shows many tesseract_retry_won events with primary_chars "
+        "> 800 and improvement < 2%, the OCR retry is doubling processing time "
+        "on long narrative pages. Raise tesseract_retry_max_chars in OCRConfig "
+        "(src/edx/config/ocr_config.py, default 800) so the retry only fires on "
+        "short cover/title pages where PSM choice matters."
     ),
     "oom_kill": (
         "Pipeline subprocess was killed by the OS OOM killer (returncode=-9) "
@@ -89,6 +114,53 @@ _HINTS: Final[dict[TaxonomyCode, str]] = {
         "src/edx/stages/text_extractor/ocr/tesseract.py processes pages one "
         "at a time (first_page/last_page), bounding peak memory to ~46 MB per "
         "page. Do NOT revert to bulk convert_from_path — it will OOM again."
+    ),
+    "llm_arg_too_long": (
+        "Metric Extractor failed to spawn the claude subprocess with OSError "
+        "[Errno 7] Argument list too long. Linux MAX_ARG_STRLEN (128 KB) limits "
+        "each individual argv string; for large RSBU documents assembled from "
+        "100+ pages of extracted text (~576 KB UTF-8), passing the user prompt as "
+        "a positional CLI arg to `claude -p` exceeds this limit. "
+        "Fix: in src/edx/providers/llm/claude_code_provider.py _run_claude(), "
+        "remove `user` from the argv list and pass it via stdin instead: "
+        "add `stdin=asyncio.subprocess.PIPE` to create_subprocess_exec, and "
+        "change proc.communicate() to proc.communicate(input=user.encode('utf-8')). "
+        "The `claude -p` CLI reads from stdin when no positional [prompt] is given."
+    ),
+    "llm_credits_exhausted": (
+        "Metric Extractor attempted to call the LLM but both the primary provider "
+        "(Anthropic) and the fallback (OpenRouter) returned HTTP 402 Insufficient "
+        "Credits. No metrics were extracted. This is an external infrastructure "
+        "issue — the operator must add credits to the LLM account(s) before "
+        "metric extraction can succeed. After credits are restored, the pipeline "
+        "will automatically retry all affected publications (they remain in "
+        "'extracted' status thanks to the tick-88 fix)."
+    ),
+    "llm_failed_stuck": (
+        "Publications are permanently stuck in 'failed' status from a prior run "
+        "where metric extraction hit HTTP 402 (Insufficient Credits). The "
+        "orchestrator only feeds publications in 'extracted' status to the "
+        "metric_extractor — so these publications are silently skipped every run "
+        "even after LLM credits are restored. The tick-88 fix adds "
+        "reset_llm_unavailable_to_extracted() to PublicationsRepo and calls it in "
+        "the orchestrator before the metric_extractor stage, so stuck publications "
+        "are unblocked automatically. Also: metric_extractor.service no longer "
+        "marks publications as 'failed' on LLMUnavailableError — they stay in "
+        "'extracted' for retry."
+    ),
+    "all_terminal_no_metrics": (
+        "All publications are in terminal processing states (written or skipped) "
+        "but 0 metrics were extracted. 'Written' publications were processed by "
+        "the LLM which found no financial metrics — typically scanned documents "
+        "(image-only PDFs) with poor OCR quality, or documents with no tabular "
+        "financial data (e.g. auditor reports, explanatory notes). 'Skipped' "
+        "publications had no documents matching the reporting profile "
+        "(IFRS/RSBU/ISSUER) — typically annual reports (type 2) or appendices "
+        "without financial statement tables. This is a stable terminal state: "
+        "no code fix can extract metrics from non-financial documents or scanned "
+        "images with no recoverable text. On the next run the verdict will be 'ok' "
+        "(all-terminal-no-metrics branch in verdict.py), placing the company on "
+        "the normal 7-day cooldown cycle."
     ),
     "metric_coverage_zero": (
         "Metric Extractor processed the doc but extracted 0 metrics. "
@@ -234,19 +306,23 @@ def _classify_one(
         return "discoverer_403_servicepipe", _trim_evidence(sp_lines)
 
     # 2. Discoverer found nothing across all types.
-    no_pub_count = sum(
-        1
+    #    Distinguish HTTP 404/410 (ID doesn't exist on the portal — use
+    #    discoverer_id_not_found) from HTTP 200 with an empty file table
+    #    (ID is valid, company just has no filed reports — discoverer_no_publications).
+    no_pub_lines = [
+        line
         for line in ticker_logs
         if line.get("event") == "discoverer_no_publications_for_type"
-    )
-    if no_pub_count >= 4:
-        evidence = _trim_evidence(
-            [
-                line
-                for line in ticker_logs
-                if line.get("event") == "discoverer_no_publications_for_type"
-            ]
+    ]
+    if len(no_pub_lines) >= 4:
+        evidence = _trim_evidence(no_pub_lines)
+        _not_found_statuses = {404, 410}
+        all_http_not_found = all(
+            _safe_int(line.get("status")) in _not_found_statuses
+            for line in no_pub_lines
         )
+        if all_http_not_found:
+            return "discoverer_id_not_found", evidence
         return "discoverer_no_publications", evidence
 
     # 2.5. Company has publications on the website but all predate the cutoff
@@ -318,6 +394,99 @@ def _classify_one(
         if pipeline_returncode == -9:
             return "oom_kill", _trim_evidence(pub_extracted_lines[:3])
         return "pipeline_timeout", _trim_evidence(pub_extracted_lines[:3])
+
+    # 4.6. Publications stuck in 'failed' status from a prior HTTP 402 run.
+    #      When metric_extractor previously marked publications as 'failed' on
+    #      LLMUnavailableError, those publications are skipped by the
+    #      orchestrator on every subsequent run — even after credits are
+    #      restored — because the orchestrator only feeds 'extracted'
+    #      publications to the metric_extractor.  Fires when the state slice
+    #      shows failed publications with HTTP 402 in last_error AND no
+    #      metric_extract_* events are present in the log (the metric_extractor
+    #      never ran because there were no 'extracted' publications to process).
+    #      Placed before rule 4.75 so the more specific stuck-state diagnosis
+    #      takes precedence over the general credits-exhausted hint.
+    _raw_pubs = slice_for_ticker.get("publications")
+    _pubs_list: list[object] = _raw_pubs if isinstance(_raw_pubs, list) else []
+    stuck_llm_pubs = [
+        p
+        for p in _pubs_list
+        if isinstance(p, dict)
+        and p.get("status") == "failed"
+        and isinstance(p.get("last_error"), str)
+        and "HTTP 402" in str(p["last_error"])
+    ]
+    if stuck_llm_pubs and not metric_started_lines:
+        evidence = tuple(
+            json.dumps(
+                {
+                    "publication_id": p.get("publication_id"),
+                    "status": p.get("status"),
+                    "last_error": str(p.get("last_error", ""))[:120],
+                },
+                ensure_ascii=False,
+            )
+            for p in stuck_llm_pubs[:5]
+        )
+        return "llm_failed_stuck", evidence
+
+    # 4.65. LLM subprocess spawn failed with OSError [Errno 7] — user prompt
+    #       passed as a CLI arg exceeds Linux MAX_ARG_STRLEN (128 KB).
+    #       Placed before 4.75 so the E2BIG-specific hint takes precedence
+    #       over the generic credits-exhausted hint.
+    arg_too_long_lines = [
+        line
+        for line in log_lines
+        if line.get("event") == "metric_extract_llm_unavailable"
+        and isinstance(line.get("publication_id"), str)
+        and str(line["publication_id"]).startswith(ticker + "-")
+        and "Argument list too long" in str(line.get("error", ""))
+    ]
+    if arg_too_long_lines:
+        return "llm_arg_too_long", _trim_evidence(arg_too_long_lines)
+
+    # 4.75. LLM provider out of credits — metric_extract_llm_unavailable events
+    #       exist for this ticker's publications (HTTP 402 on both primary and
+    #       fallback providers). Placed before rule 5 so the operator sees the
+    #       actionable "add LLM credits" hint instead of the misleading
+    #       "extend synonyms" hint from metric_coverage_zero.
+    llm_unavail_lines = [
+        line
+        for line in log_lines
+        if line.get("event") == "metric_extract_llm_unavailable"
+        and isinstance(line.get("publication_id"), str)
+        and str(line["publication_id"]).startswith(ticker + "-")
+    ]
+    if llm_unavail_lines:
+        return "llm_credits_exhausted", _trim_evidence(llm_unavail_lines)
+
+    # 4.8. All publications in terminal states (written or skipped) with 0 metrics.
+    #      Fires when the state slice shows ALL publications are in {written, skipped}
+    #      AND metrics_count == 0. This is a stable terminal state — no code fix can
+    #      produce metrics from non-financial documents or scanned images.  Placed
+    #      before rule 5 (metric_coverage_zero) to suppress the misleading "extend
+    #      synonyms" hint when the actual cause is non-financial documents (annual
+    #      reports, appendices) or poor OCR on old scanned RSBU filings.
+    _metrics_count_48 = _safe_int(slice_for_ticker.get("metrics_count"))
+    if _pubs_list and _metrics_count_48 == 0:
+        _terminal = {"written", "skipped"}
+        _all_terminal = all(
+            isinstance(p, dict) and p.get("status") in _terminal
+            for p in _pubs_list
+        )
+        if _all_terminal:
+            _n_written = sum(
+                1 for p in _pubs_list
+                if isinstance(p, dict) and p.get("status") == "written"
+            )
+            _n_skipped = sum(
+                1 for p in _pubs_list
+                if isinstance(p, dict) and p.get("status") == "skipped"
+            )
+            return "all_terminal_no_metrics", (
+                f"{len(_pubs_list)} publications all terminal: "
+                f"written={_n_written}, skipped={_n_skipped}, metrics=0",
+            )
 
     # 5. Coverage signals from state.
     metrics_rows = _safe_int(slice_for_ticker.get("metrics_count"))

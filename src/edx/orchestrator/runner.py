@@ -240,6 +240,12 @@ class Orchestrator:
             self.stages.text_extractor,
             errors,
         )
+        # Unblock publications that were stuck in 'failed' due to a
+        # transient LLM HTTP 402 (no credits).  These should be retried
+        # when credits are restored; leaving them as 'failed' would lock
+        # them out permanently since the orchestrator never retries that
+        # status.
+        self.publications_repo.reset_llm_unavailable_to_extracted()
         # Metric Extractor — reports only.
         report_targets = self._filter(
             self.publications_repo.list_by_status(EXTRACTED_STATUS),

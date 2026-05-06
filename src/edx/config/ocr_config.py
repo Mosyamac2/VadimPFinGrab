@@ -43,5 +43,9 @@ class OCRConfig(BaseModel):
     tesseract_retry_psm: int | None = Field(default=4)
     tesseract_retry_min_chars: int = Field(default=80, ge=0)
     tesseract_retry_min_digit_ratio: float = Field(default=0.05, ge=0.0, le=1.0)
+    # Pages with >= this many chars are not retried: PSM choice barely affects
+    # long narrative pages (<1% char improvement) while doubling OCR time.
+    # Only cover/title/short pages (< 800 chars) benefit from the PSM retry.
+    tesseract_retry_max_chars: int = Field(default=800, ge=0)
     yandex_vision: YandexVisionOptions = Field(default_factory=YandexVisionOptions)
     google_vision: GoogleVisionOptions = Field(default_factory=GoogleVisionOptions)

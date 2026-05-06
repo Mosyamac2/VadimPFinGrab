@@ -304,6 +304,59 @@ def test_corrupted_zip_marks_publication_failed_does_not_crash_stage(
     assert outcomes[1].documents_added == 1
 
 
+def test_zip_with_filename_too_long_marks_failed_not_crash_stage(
+    tmp_path: Path,
+) -> None:
+    """ZIP member whose filename component exceeds the OS NAME_MAX (255 bytes on
+    Linux/ext4/tmpfs) must mark the one publication as 'failed', not abort the
+    entire unpacker stage.  The next publication in the same run must still be
+    processed.  Regression test for the OSError: [Errno 36] File name too long
+    crash that caused orchestrator_stage_failed on EDX1285-4-1265908 (tick #87)."""
+    db, conn, pub_dir = _seed_publication(tmp_path, pub_id="pub-long")
+    raw_dir = tmp_path / "raw"
+
+    # Seed a second, healthy publication to verify the stage continues.
+    TickersRepo(db, conn).upsert_from_config(
+        [TickerEntry(ticker="SBER", e_disclosure_id="1", name="SBER")]
+    )
+    PublicationsRepo(db, conn).upsert_discovered(
+        publication_id="pub-ok",
+        ticker="SBER",
+        publication_type="report",
+        publication_date="2026-04-02",
+        source_url="https://example.test/ok.zip",
+    )
+    PublicationsRepo(db, conn).mark_status("pub-ok", "downloaded", file_hash="y")
+    ok_dir = raw_dir / "SBER" / "pub-ok"
+    ok_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(ok_dir / "ok.zip", "w") as zf:
+        zf.writestr("report.pdf", b"PDF-BYTES")
+
+    # Cyrillic 'а' (U+0430) is 2 bytes in UTF-8; 200 × 2 = 400 bytes > NAME_MAX=255.
+    long_name = "а" * 200 + ".pdf"
+    archive = pub_dir / "report.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr(long_name, b"CONTENT")
+
+    try:
+        service = _service(db, conn, raw_dir=raw_dir)
+        repo = PublicationsRepo(db, conn)
+        bad_pub = repo.get_by_id("pub-long")
+        ok_pub = repo.get_by_id("pub-ok")
+        assert bad_pub is not None and ok_pub is not None
+        outcomes = service.run([bad_pub, ok_pub])
+        bad_after = repo.get_by_id("pub-long")
+        ok_after = repo.get_by_id("pub-ok")
+    finally:
+        conn.close()
+
+    assert bad_after is not None and bad_after.status == "failed"
+    assert bad_after.last_error is not None and "zip extraction failed" in bad_after.last_error
+    assert ok_after is not None and ok_after.status == "unpacked"
+    assert len(outcomes) == 2
+    assert outcomes[1].documents_added == 1
+
+
 @pytest.mark.skipif(
     shutil.which("unrar") is None and shutil.which("unar") is None,
     reason="no unrar/unar binary on PATH",

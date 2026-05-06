@@ -254,20 +254,9 @@ async def _main_async(argv: list[str]) -> int:
         print("No tickers selected.", file=sys.stderr)
         return 2
 
-    from edx.http.client import EDisclosureClient, build_user_agent
+    from edx.http import build_http_client
 
-    cfg = settings.app.discoverer
-    async with EDisclosureClient(
-        base_url=cfg.base_url,
-        user_agent=build_user_agent(settings),
-        requests_per_second=cfg.requests_per_second,
-        request_timeout_s=cfg.request_timeout_s,
-        max_retries=cfg.max_retries,
-        retry_min_wait_s=cfg.retry_min_wait_s,
-        retry_max_wait_s=cfg.retry_max_wait_s,
-        respect_robots=cfg.respect_robots,
-        cookies=cfg.cookies or None,
-    ) as client:
+    async with build_http_client(settings) as client:
         suggestions = await find_ids(client, chosen)
 
     print(format_table(suggestions))

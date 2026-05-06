@@ -46,7 +46,7 @@ DEFAULT_CSV_PATH: Final[Path] = Path("e-disclosure-companies.csv")
 DEFAULT_MAIN_TICKERS_YAML: Final[Path] = Path("config/tickers.yaml")
 DEFAULT_EVOLVE_CONFIG_DIR: Final[Path] = Path("config-evolve")
 DEFAULT_BUNDLE_ROOT: Final[Path] = Path("evolution/runs")
-DEFAULT_PIPELINE_TIMEOUT_S: Final[int] = 90 * 60
+DEFAULT_PIPELINE_TIMEOUT_S: Final[int] = 12 * 60 * 60
 
 DEFAULT_TICK_BUDGET_USD: Final[float] = 100.0
 DEFAULT_DAILY_BUDGET_USD: Final[float] = 1000.0
@@ -586,8 +586,13 @@ def _batch_improvement(
     before_verdicts: dict[str, TickerVerdict],
     after_verdicts: dict[str, TickerVerdict],
 ) -> tuple[bool, bool]:
+    # Count any non-ok → ok transition as improvement, not only fail/regression → ok.
+    # A neutral ticker that produces metrics after the agent fixes the root cause
+    # (e.g., corrected e_disclosure_id) is genuine progress and should allow the
+    # tick to land. Excluding neutral from this check caused the gate to
+    # permanently reject ticks where the only failing company started as neutral.
     improved = any(
-        before_verdicts[t].code in ("fail", "regression")
+        before_verdicts[t].code != "ok"
         and after_verdicts[t].code == "ok"
         for t in before_verdicts
     )

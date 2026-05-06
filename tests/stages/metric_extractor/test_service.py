@@ -18,7 +18,7 @@ from edx.config import (
     TickerEntry,
     TickersConfig,
 )
-from edx.providers.llm import LLMRequest, LLMResponse
+from edx.providers.llm import LLMRequest, LLMResponse, LLMUnavailableError
 from edx.stages.metric_extractor.service import (
     MetricExtractorService,
     normalize_value,
@@ -430,6 +430,58 @@ async def test_invalid_response_marks_publication_failed_other_continue(
     assert len(outcomes) == 1
     assert outcomes[0].publication_id == pub_b
     assert pa_after is not None and pa_after.status == "failed"
+    assert pb_after is not None and pb_after.status == "extracted"
+
+
+@pytest.mark.asyncio
+async def test_llm_unavailable_leaves_publication_in_extracted_not_failed(
+    workspace: tuple[Database, Path, Path],
+) -> None:
+    """LLMUnavailableError (HTTP 402 / no credits) must NOT mark publication
+    as 'failed'.  Doing so would lock it out permanently — the orchestrator
+    only feeds 'extracted' publications to the metric_extractor, so a 'failed'
+    publication is never retried even after credits are restored.
+    """
+    db, raw_dir, processed_dir = workspace
+    pub_a = _seed_publication(
+        db, pub_id="pub-a", standards=["IFRS"], raw_dir=raw_dir
+    )
+    pub_b = _seed_publication(
+        db, pub_id="pub-b", standards=["IFRS"], raw_dir=raw_dir
+    )
+
+    call_count = [0]
+
+    def handler(req: LLMRequest) -> dict[str, Any] | Exception:
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return LLMUnavailableError(
+                "openrouter HTTP 402: {\"error\":{\"message\":\"Insufficient credits.\"}}"
+            )
+        return _full_extraction_payload()
+
+    llm = _FakeLLM(handler=handler)
+    service, conn = _build_service(db, raw_dir, processed_dir, llm)
+    try:
+        pubs_repo = PublicationsRepo(db, conn)
+        pa = pubs_repo.get_by_id(pub_a)
+        pb = pubs_repo.get_by_id(pub_b)
+        assert pa is not None and pb is not None
+        outcomes = await service.run([pa, pb])
+        pa_after = pubs_repo.get_by_id(pub_a)
+        pb_after = pubs_repo.get_by_id(pub_b)
+    finally:
+        conn.close()
+
+    # pub-a hit LLMUnavailableError — must stay in 'extracted' (not 'failed')
+    # so the orchestrator retries it when credits are restored.
+    assert pa_after is not None and pa_after.status == "extracted", (
+        f"publication should remain 'extracted' after LLMUnavailableError, "
+        f"got: {pa_after.status!r}"
+    )
+    # pub-b should have succeeded normally.
+    assert len(outcomes) == 1
+    assert outcomes[0].publication_id == pub_b
     assert pb_after is not None and pb_after.status == "extracted"
 
 

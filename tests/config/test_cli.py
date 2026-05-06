@@ -20,6 +20,12 @@ def _run_cli(
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     full_env = {**os.environ, **(env or {})}
+    # Strip LLM-provider env vars so hermetic CLI tests are never affected by
+    # the operator's production setup (EDX_LLM_PROVIDER=claude_code leaks from
+    # the systemd unit and forces ClaudeCode even when the test supplies
+    # ANTHROPIC_API_KEY=fake-key-for-test, causing LLMUnavailableError).
+    full_env.pop("EDX_LLM_PROVIDER", None)
+    full_env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
     return subprocess.run(
         [sys.executable, "-m", "edx.cli", *args],
         capture_output=True,
@@ -62,6 +68,9 @@ def _make_isolated_workspace_for_orchestrator(tmp_path: Path) -> Path:
     app["paths"]["output_dir"] = str(tmp_path / "output")
     app["paths"]["excel_path"] = str(tmp_path / "output" / "e-disclosure.xlsx")
     app["paths"]["logs_dir"] = str(tmp_path / "logs")
+    # Force httpx backend so the test never opens a real network connection,
+    # regardless of what config/app.yaml says (operator may switch to playwright).
+    app["discoverer"]["http_backend"] = "httpx"
     (cfg_dir / "app.yaml").write_text(yaml.safe_dump(app), encoding="utf-8")
     return cfg_dir
 

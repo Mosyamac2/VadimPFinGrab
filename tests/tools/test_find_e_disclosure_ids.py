@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import sys
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 _TOOL_PATH = (
     Path(__file__).resolve().parents[2]
@@ -62,3 +64,48 @@ def test_rank_candidates_top_n_truncation() -> None:
         candidates, target_name="Name 0", top_n=3
     )
     assert len(ranked) == 3
+
+
+def test_main_async_uses_build_http_client_not_direct_client() -> None:
+    """_main_async must delegate HTTP client creation to build_http_client
+    so the configured http_backend (e.g. playwright) is respected, not
+    hard-coded to the plain httpx EDisclosureClient."""
+    from unittest.mock import MagicMock as _MM
+
+    # Fake settings: one ticker named FAKE that matches the --tickers filter.
+    # We mock load_all so the test is independent of the config-evolve directory
+    # (which only contains the current batch's tickers and changes every tick).
+    fake_ticker = _MM()
+    fake_ticker.ticker = "FAKE"
+    fake_ticker.name = "Fake Company"
+
+    fake_settings = _MM()
+    fake_settings.tickers.tickers = [fake_ticker]
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.text = "<html><body></body></html>"
+
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=mock_response)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+
+    build_calls: list[object] = []
+
+    def fake_build_http_client(settings: object) -> object:
+        build_calls.append(settings)
+        return mock_client
+
+    with (
+        patch("find_e_disclosure_ids.load_all", return_value=fake_settings),
+        patch("edx.http.build_http_client", fake_build_http_client),
+    ):
+        result = asyncio.run(
+            find_mod._main_async(
+                ["--tickers", "FAKE", "--config-dir", "/nonexistent"]
+            )
+        )
+
+    assert result == 0
+    assert len(build_calls) == 1, "build_http_client must be called exactly once"

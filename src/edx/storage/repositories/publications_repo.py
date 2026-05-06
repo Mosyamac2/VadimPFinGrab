@@ -156,6 +156,26 @@ class PublicationsRepo:
             )
             return cursor.rowcount
 
+    def reset_llm_unavailable_to_extracted(self) -> int:
+        """Reset publications stuck in 'failed' due to LLM HTTP 402 errors
+        back to 'extracted' so they are retried when credits are restored.
+
+        Returns the number of rows updated.
+        """
+        with self.db.transaction(self.conn):
+            cursor = self.conn.execute(
+                """
+                UPDATE publications
+                   SET status     = 'extracted',
+                       last_error = NULL,
+                       updated_at = ?
+                 WHERE status = 'failed'
+                   AND last_error LIKE '%HTTP 402%'
+                """,
+                (now_iso(),),
+            )
+            return cursor.rowcount
+
     def list_by_status(self, status: PublicationStatus) -> list[PublicationRow]:
         cursor = self.conn.execute(
             "SELECT * FROM publications WHERE status = ? ORDER BY publication_date",

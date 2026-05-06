@@ -166,9 +166,11 @@ class MetricExtractorService:
                     publication_id=pub.publication_id,
                     error=str(exc),
                 )
-                self.publications_repo.mark_status(
-                    pub.publication_id, "failed", error=str(exc)
-                )
+                # Leave the publication in 'extracted' status so it is
+                # retried automatically in the next run once LLM credits
+                # are restored.  Marking it 'failed' here would lock it
+                # out permanently — the orchestrator only feeds 'extracted'
+                # publications to the metric_extractor.
                 continue
             except ValidationError as exc:
                 self._log.error(

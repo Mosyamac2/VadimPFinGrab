@@ -63,13 +63,16 @@ def test_two_failing_companies_same_class_classified_independently(
         assert entry.code == "discoverer_403_servicepipe"
 
 
-def test_verdict_treats_zero_metrics_with_returncode_zero_as_neutral() -> None:
-    """When the pipeline ran cleanly but found no metrics (no documents
-    matching profile reporting_priority — e.g. only type=2 publications),
-    we expect ``neutral``, not ``fail``.
+def test_verdict_treats_zero_metrics_with_returncode_zero_as_ok() -> None:
+    """All publications in terminal states (skipped) with 0 metrics → ``ok``.
 
-    Caught in pilot Phase 1 spot-check: too-eager FAIL would push
-    these companies to skiplist after 3 ticks даже без actual regression.
+    Originally written in pilot Phase 1 to ensure the verdict wasn't ``fail``
+    (which would push companies to the skiplist after 3 ticks). The all-
+    terminal-no-metrics fix (tick #180) now correctly returns ``ok`` instead of
+    ``neutral``: the company has been fully processed, all publications were
+    inspected by the metric extractor, none had IFRS/RSBU/ISSUER documents, so
+    there is nothing more to extract.  ``ok`` places the ticker on the 7-day
+    cooldown cycle instead of re-selecting it on every tick indefinitely.
     """
     snap = TickerSnapshot(
         ticker="EDXX",
@@ -83,7 +86,7 @@ def test_verdict_treats_zero_metrics_with_returncode_zero_as_neutral() -> None:
         last_publication_date="2026-04-01",
     )
     v = compute_verdict(snap, snap, pipeline_returncode=0)
-    assert v.code == "neutral"
+    assert v.code == "ok"
 
 
 def test_aggregate_verdict_with_mixed_neutral_and_ok_is_neutral() -> None:

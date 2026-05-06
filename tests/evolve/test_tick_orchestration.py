@@ -9,7 +9,8 @@ from pathlib import Path
 from edx.config import load_all
 from edx.evolve import tick as tick_module
 from edx.evolve.runner import PipelineRunResult
-from edx.evolve.tick import read_moex_e_disclosure_ids
+from edx.evolve.tick import _batch_improvement, read_moex_e_disclosure_ids
+from edx.evolve.verdict import TickerVerdict
 
 
 def _make_app_yaml(target: Path, state_db: Path, output: Path) -> None:
@@ -132,6 +133,11 @@ def test_run_one_tick_no_candidates_returns_zero(tmp_path: Path) -> None:
 
 def test_run_one_tick_records_baseline(monkeypatch, tmp_path: Path) -> None:
     """End-to-end happy path with the pipeline subprocess mocked out."""
+    # Isolate from production env: agent-enabled would try to create a git
+    # branch (failing if evolve/tick-1 already exists); batch-size=1 would
+    # cause the picker to return only 1 ticker instead of the expected 3.
+    monkeypatch.delenv("EDX_EVOLVE_AGENT_ENABLED", raising=False)
+    monkeypatch.delenv("EDX_EVOLVE_BATCH_SIZE", raising=False)
     proj, cfg, csv = _setup_project(tmp_path)
 
     captured: dict[str, list[str]] = {}
@@ -230,6 +236,9 @@ def test_run_one_tick_honours_batch_size_env(
 
 def test_run_one_tick_skips_moex_overlap(monkeypatch, tmp_path: Path) -> None:
     """A company id present in main config/tickers.yaml is excluded."""
+    # Isolate from production env vars (same reasons as test_run_one_tick_records_baseline).
+    monkeypatch.delenv("EDX_EVOLVE_AGENT_ENABLED", raising=False)
+    monkeypatch.delenv("EDX_EVOLVE_BATCH_SIZE", raising=False)
     proj, cfg, _csv = _setup_project(tmp_path)
     csv = proj / "csv_with_overlap.csv"
     csv.write_text(
@@ -269,3 +278,62 @@ def test_run_one_tick_skips_moex_overlap(monkeypatch, tmp_path: Path) -> None:
     # 3043 must be missing from the run.
     assert "EDX3043" not in captured["tickers"]
     assert captured["tickers"] == ["EDX1", "EDX2", "EDX3"]
+
+
+# ---------------------------------------------------------------------------
+# _batch_improvement unit tests
+# ---------------------------------------------------------------------------
+
+
+def _make_verdict(ticker: str, code: str) -> TickerVerdict:
+    return TickerVerdict(
+        ticker=ticker,
+        code=code,  # type: ignore[arg-type]
+        metrics_delta=0,
+        publications_written_delta=0,
+        qa_issues_delta=0,
+        notes=(),
+    )
+
+
+def test_batch_improvement_fail_to_ok_counts_as_improved() -> None:
+    before = {"EDX1": _make_verdict("EDX1", "fail")}
+    after = {"EDX1": _make_verdict("EDX1", "ok")}
+    improved, not_regressed = _batch_improvement(before, after)
+    assert improved is True
+    assert not_regressed is True
+
+
+def test_batch_improvement_neutral_to_ok_counts_as_improved() -> None:
+    """neutral → ok must count as improvement so tickers with invalid
+    e_disclosure_ids that get corrected by the operator can pass the gate."""
+    before = {"EDX1": _make_verdict("EDX1", "neutral")}
+    after = {"EDX1": _make_verdict("EDX1", "ok")}
+    improved, not_regressed = _batch_improvement(before, after)
+    assert improved is True
+    assert not_regressed is True
+
+
+def test_batch_improvement_neutral_to_neutral_not_improved() -> None:
+    before = {"EDX1": _make_verdict("EDX1", "neutral")}
+    after = {"EDX1": _make_verdict("EDX1", "neutral")}
+    improved, not_regressed = _batch_improvement(before, after)
+    assert improved is False
+    assert not_regressed is True
+
+
+def test_batch_improvement_ok_to_ok_not_counted_as_improvement() -> None:
+    """A ticker that was already ok and stays ok should not count as improvement."""
+    before = {"EDX1": _make_verdict("EDX1", "ok")}
+    after = {"EDX1": _make_verdict("EDX1", "ok")}
+    improved, not_regressed = _batch_improvement(before, after)
+    assert improved is False
+    assert not_regressed is True
+
+
+def test_batch_improvement_regression_detected() -> None:
+    before = {"EDX1": _make_verdict("EDX1", "fail")}
+    after = {"EDX1": _make_verdict("EDX1", "regression")}
+    improved, not_regressed = _batch_improvement(before, after)
+    assert improved is False
+    assert not_regressed is False

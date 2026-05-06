@@ -18,6 +18,7 @@ def build_ocr_provider(ocr_config: OCRConfig) -> OCRProvider:
             retry_psm=ocr_config.tesseract_retry_psm,
             retry_min_chars=ocr_config.tesseract_retry_min_chars,
             retry_min_digit_ratio=ocr_config.tesseract_retry_min_digit_ratio,
+            retry_max_chars=ocr_config.tesseract_retry_max_chars,
         )
     if engine == "yandex_vision":
         return YandexVisionOCRProvider(

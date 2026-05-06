@@ -46,8 +46,10 @@ class _FakeProc:
         self._delay = delay
         self.terminated = False
         self.killed = False
+        self.communicate_input: bytes | None = None
 
-    async def communicate(self) -> tuple[bytes, bytes]:
+    async def communicate(self, *, input: bytes | None = None) -> tuple[bytes, bytes]:
+        self.communicate_input = input
         if self._delay:
             await asyncio.sleep(self._delay)
         return self._stdout, self._stderr
@@ -128,20 +130,21 @@ def _patch_subprocess(
     captured: dict[str, object] | None = None,
 ) -> None:
     """Replace asyncio.create_subprocess_exec with a stub that pops one
-    canned _FakeProc per call and stores the argv/env into ``captured``."""
+    canned _FakeProc per call and stores the argv/env/proc into ``captured``."""
     fakes_iter = iter(fakes)
 
     async def _create(*argv: str, **kwargs: object) -> _FakeProc:
-        if captured is not None:
-            captured.setdefault("calls", []).append(  # type: ignore[union-attr]
-                {"argv": list(argv), "env": kwargs.get("env")}
-            )
         try:
-            return next(fakes_iter)
+            proc = next(fakes_iter)
         except StopIteration:
             raise AssertionError(
                 "test exhausted its canned subprocess responses"
             ) from None
+        if captured is not None:
+            captured.setdefault("calls", []).append(  # type: ignore[union-attr]
+                {"argv": list(argv), "env": kwargs.get("env"), "proc": proc}
+            )
+        return proc
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _create)
 
@@ -261,10 +264,66 @@ async def test_pdf_input_staged_to_tempdir_and_add_dir(
     # itself shouldn't exist anymore — anti-regression for the
     # "leak temp PDFs" failure mode in MEMORY.md hard constraints.
     assert not add_dir.exists()
-    # The user prompt must reference document.pdf so the model knows
-    # which file to Read.
-    prompt_idx = argv.index("-p")
-    assert "document.pdf" in argv[prompt_idx + 1]
+    # The user prompt is passed via stdin (not as argv) to avoid
+    # Linux MAX_ARG_STRLEN (128 KB) for large documents. Verify
+    # that the stdin input mentions document.pdf.
+    proc: _FakeProc = captured["calls"][0]["proc"]  # type: ignore[index]
+    assert proc.communicate_input is not None
+    assert b"document.pdf" in proc.communicate_input
+
+
+# ------------------------------------------- stdin vs argv (E2BIG fix)
+
+@pytest.mark.asyncio
+async def test_user_prompt_passed_via_stdin_not_argv(
+    monkeypatch: pytest.MonkeyPatch,
+    request_factory: Callable[..., object],
+) -> None:
+    """Anti-regression for tick-103 E2BIG: user prompt must be sent via
+    stdin (proc.communicate(input=...)), NOT as a positional argv after -p.
+    Linux MAX_ARG_STRLEN=128KB limits individual argv strings; large RSBU
+    documents exceed this and cause OSError [Errno 7]."""
+    big_prompt = "A" * 200_000  # 200 KB — well above 128 KB limit
+    captured: dict[str, object] = {}
+    _patch_subprocess(
+        monkeypatch,
+        [_FakeProc(_stream_json())],
+        captured,
+    )
+    provider = ClaudeCodeLLMProvider.create(claude_executable="/usr/bin/claude")
+    await provider.complete(request_factory(user_text=big_prompt))  # type: ignore[arg-type]
+
+    argv: list[str] = captured["calls"][0]["argv"]  # type: ignore[index]
+    # The big prompt must NOT appear in argv at all.
+    assert big_prompt not in argv
+    # -p must still be in argv (tells claude to use non-interactive mode
+    # and read from stdin).
+    assert "-p" in argv
+    # argv element after -p should be the next flag, not the prompt text.
+    p_idx = argv.index("-p")
+    assert argv[p_idx + 1].startswith("--")
+
+    # Prompt must be delivered via communicate(input=...).
+    proc: _FakeProc = captured["calls"][0]["proc"]  # type: ignore[index]
+    assert proc.communicate_input is not None
+    assert big_prompt.encode("utf-8") in proc.communicate_input
+
+
+@pytest.mark.asyncio
+async def test_oserror_errno7_raises_llm_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    request_factory: Callable[..., object],
+) -> None:
+    """OSError [Errno 7] during create_subprocess_exec is re-raised as
+    LLMUnavailableError with a message that includes the executable path."""
+
+    async def _fail(*_a: object, **_kw: object) -> _FakeProc:
+        raise OSError(7, "Argument list too long")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fail)
+    provider = ClaudeCodeLLMProvider.create(claude_executable="/usr/bin/claude")
+    with pytest.raises(LLMUnavailableError, match="cannot spawn"):
+        await provider.complete(request_factory())  # type: ignore[arg-type]
 
 
 # ------------------------------------------------ JSON parsing edges

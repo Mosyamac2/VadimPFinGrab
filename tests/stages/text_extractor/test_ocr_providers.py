@@ -72,6 +72,7 @@ def test_default_construction_uses_psm_6_dpi_400() -> None:
     assert provider.retry_psm == 4
     assert provider.retry_min_chars == 80
     assert provider.retry_min_digit_ratio == 0.05
+    assert provider.retry_max_chars == 800
 
 
 def test_factory_propagates_psm_and_retry_knobs() -> None:
@@ -123,7 +124,8 @@ def test_needs_retry_short_text_triggers() -> None:
 
 def test_needs_retry_low_digit_ratio_triggers() -> None:
     provider = TesseractOCRProvider(retry_min_digit_ratio=0.05)
-    # 200-char Russian text without digits → digit_ratio = 0 → retry.
+    # 350-char Russian text without digits → digit_ratio = 0 → retry
+    # (350 < default retry_max_chars=800, so the max-chars gate does not fire).
     assert provider._needs_retry("русский текст без цифр совсем нет " * 10) is True
 
 
@@ -134,6 +136,41 @@ def test_needs_retry_passing_text_does_not_trigger() -> None:
     # 200 chars, ~30 digits → ratio 0.15 > 0.05 → no retry.
     text = "Активы 397216398 Запасы 73327449 Баланс 846546320 " * 4
     assert provider._needs_retry(text) is False
+
+
+def test_needs_retry_long_page_skips_retry_regardless_of_digit_ratio() -> None:
+    # 2600 chars with zero digits — digit_ratio = 0 would normally trigger retry,
+    # but retry_max_chars=800 suppresses it for long narrative pages.
+    provider = TesseractOCRProvider(retry_min_digit_ratio=0.05, retry_max_chars=800)
+    long_narrative = "нарратив " * 290  # ~2610 chars, all alphabetic
+    assert len(long_narrative.strip()) >= 800
+    assert provider._needs_retry(long_narrative) is False
+
+
+def test_needs_retry_medium_page_below_max_chars_still_retries() -> None:
+    # 500-char text with zero digits and retry_max_chars=800 → still retries
+    # (500 < 800, so the max-chars gate doesn't fire; digit check does).
+    provider = TesseractOCRProvider(retry_min_digit_ratio=0.05, retry_max_chars=800)
+    medium_no_digits = "текст " * 84  # ~504 chars, no digits
+    assert len(medium_no_digits.strip()) < 800
+    assert provider._needs_retry(medium_no_digits) is True
+
+
+def test_default_retry_max_chars_is_800() -> None:
+    provider = TesseractOCRProvider()
+    assert provider.retry_max_chars == 800
+
+
+def test_factory_propagates_retry_max_chars() -> None:
+    cfg = OCRConfig.model_validate(
+        {
+            "engine": "tesseract",
+            "tesseract_retry_max_chars": 1200,
+        }
+    )
+    provider = build_ocr_provider(cfg)
+    assert isinstance(provider, TesseractOCRProvider)
+    assert provider.retry_max_chars == 1200
 
 
 def _patch_tesseract_one_page(

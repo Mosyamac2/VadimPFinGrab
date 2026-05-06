@@ -6,11 +6,17 @@ import json
 import sqlite3
 from pathlib import Path
 
+from edx.config import TickerEntry
 from edx.evolve import bundle as bundle_module
+from edx.evolve.bundle import (
+    _has_llm_stuck_publications,
+    _has_written_no_metrics_publications,
+    _has_zero_publications,
+)
 from edx.evolve.csv_loader import CompanyRow
 from edx.evolve.snapshot import TickerSnapshot
 from edx.evolve.verdict import TickerVerdict
-from edx.storage import Database
+from edx.storage import Database, PublicationsRepo, TickersRepo
 
 
 def _make_batch() -> list[CompanyRow]:
@@ -215,3 +221,406 @@ def test_bundle_no_failing_tickers_still_writes_taxonomy_empty(
         (bundle_dir / "failure_taxonomy.json").read_text(encoding="utf-8")
     )
     assert raw == []
+
+
+_HTTP_402_ERROR = 'openrouter HTTP 402: {"error":{"message":"Insufficient credits."}}'
+
+
+def test_has_llm_stuck_publications_true_when_http_402_in_last_error() -> None:
+    """_has_llm_stuck_publications returns True for a ticker with publications
+    stuck in 'failed' status due to HTTP 402 errors."""
+    state_slice = {
+        "EDX1": {
+            "publications": [
+                {
+                    "publication_id": "EDX1-3-100",
+                    "status": "failed",
+                    "last_error": _HTTP_402_ERROR,
+                }
+            ]
+        }
+    }
+    assert _has_llm_stuck_publications(state_slice, "EDX1") is True
+
+
+def test_has_llm_stuck_publications_false_when_no_http_402() -> None:
+    state_slice = {
+        "EDX1": {
+            "publications": [
+                {
+                    "publication_id": "EDX1-3-100",
+                    "status": "failed",
+                    "last_error": "zipfile.BadZipFile: Bad CRC-32",
+                }
+            ]
+        }
+    }
+    assert _has_llm_stuck_publications(state_slice, "EDX1") is False
+
+
+def test_has_llm_stuck_publications_false_when_no_failed_pubs() -> None:
+    state_slice = {
+        "EDX1": {
+            "publications": [
+                {
+                    "publication_id": "EDX1-3-100",
+                    "status": "written",
+                    "last_error": None,
+                }
+            ]
+        }
+    }
+    assert _has_llm_stuck_publications(state_slice, "EDX1") is False
+
+
+def test_bundle_neutral_ticker_with_stuck_llm_pubs_included_in_failing(
+    evolve_db: Database, evolve_conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    """A neutral-verdict ticker whose publications are stuck in 'failed' due to
+    HTTP 402 should appear in failing_tickers and receive llm_failed_stuck
+    taxonomy classification."""
+    bundle_dir = tmp_path / "stuck"
+    log_path = tmp_path / "p.log"
+    log_path.write_text("", encoding="utf-8")
+
+    # Seed ticker then publication stuck in 'failed' with HTTP 402 for EDX1.
+    TickersRepo(evolve_db, evolve_conn).upsert_from_config(
+        [TickerEntry(ticker="EDX1", e_disclosure_id="1", name="Co1")]
+    )
+    repo = PublicationsRepo(evolve_db, evolve_conn)
+    repo.upsert_discovered(
+        publication_id="EDX1-3-999",
+        ticker="EDX1",
+        publication_type="report",
+        publication_date="2026-01-01",
+        source_url="https://example.test/r.zip",
+    )
+    for status in ("downloaded", "unpacked", "classified", "extracted"):
+        repo.mark_status("EDX1-3-999", status)  # type: ignore[arg-type]
+    repo.mark_status(
+        "EDX1-3-999",
+        "failed",
+        error=_HTTP_402_ERROR,
+    )
+
+    batch = _make_batch()
+    verdicts = {
+        "EDX1": _verdict("EDX1", "neutral"),
+        "EDX2": _verdict("EDX2", "ok"),
+        "EDX3": _verdict("EDX3", "ok"),
+    }
+
+    manifest = bundle_module.assemble(
+        bundle_dir,
+        batch=batch,
+        snaps_before={f"EDX{i}": _empty_snap(f"EDX{i}") for i in (1, 2, 3)},
+        snaps_after={f"EDX{i}": _empty_snap(f"EDX{i}") for i in (1, 2, 3)},
+        verdicts=verdicts,
+        log_path=log_path,
+        state_db=Path(evolve_db.path),
+        conn=evolve_conn,
+    )
+
+    # The neutral ticker with stuck publications must appear in failing_tickers.
+    assert "EDX1" in manifest["failing_tickers"]
+    assert "EDX2" not in manifest["failing_tickers"]
+
+    # And the taxonomy must classify it as llm_failed_stuck.
+    raw_tax = json.loads(
+        (bundle_dir / "failure_taxonomy.json").read_text(encoding="utf-8")
+    )
+    tax_by_ticker = {e["ticker"]: e["code"] for e in raw_tax}
+    assert tax_by_ticker.get("EDX1") == "llm_failed_stuck"
+
+
+def test_has_zero_publications_true_when_empty_list() -> None:
+    state_slice: dict[str, dict[str, object]] = {
+        "EDX99": {"publications": [], "documents": [], "metrics": [], "qa_issues": []}
+    }
+    assert _has_zero_publications(state_slice, "EDX99") is True
+
+
+def test_has_zero_publications_false_when_has_publications() -> None:
+    state_slice: dict[str, dict[str, object]] = {
+        "EDX99": {
+            "publications": [{"publication_id": "EDX99-3-1", "status": "discovered"}],
+            "documents": [],
+            "metrics": [],
+            "qa_issues": [],
+        }
+    }
+    assert _has_zero_publications(state_slice, "EDX99") is False
+
+
+def test_has_zero_publications_true_when_ticker_missing_from_slice() -> None:
+    state_slice: dict[str, dict[str, object]] = {}
+    assert _has_zero_publications(state_slice, "EDX99") is True
+
+
+def test_bundle_neutral_ticker_with_zero_publications_included_in_failing(
+    evolve_db: Database, evolve_conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    """A neutral-verdict ticker with zero publications (portal returned 404 for
+    all types — invalid e_disclosure_id) must appear in failing_tickers so the
+    taxonomy fires discoverer_id_not_found."""
+    bundle_dir = tmp_path / "zero_pubs"
+    log_path = tmp_path / "p.log"
+    log_lines = [
+        json.dumps({
+            "event": "discoverer_no_publications_for_type",
+            "level": "info",
+            "ticker": "EDX1",
+            "type_code": tc,
+            "status": 404,
+        })
+        for tc in (2, 3, 4, 5)
+    ]
+    log_path.write_text("\n".join(log_lines) + "\n", encoding="utf-8")
+
+    batch = _make_batch()
+    verdicts = {
+        "EDX1": _verdict("EDX1", "neutral"),
+        "EDX2": _verdict("EDX2", "ok"),
+        "EDX3": _verdict("EDX3", "ok"),
+    }
+
+    manifest = bundle_module.assemble(
+        bundle_dir,
+        batch=batch,
+        snaps_before={f"EDX{i}": _empty_snap(f"EDX{i}") for i in (1, 2, 3)},
+        snaps_after={f"EDX{i}": _empty_snap(f"EDX{i}") for i in (1, 2, 3)},
+        verdicts=verdicts,
+        log_path=log_path,
+        state_db=Path(evolve_db.path),
+        conn=evolve_conn,
+    )
+
+    assert "EDX1" in manifest["failing_tickers"]
+    assert "EDX2" not in manifest["failing_tickers"]
+
+    raw_tax = json.loads(
+        (bundle_dir / "failure_taxonomy.json").read_text(encoding="utf-8")
+    )
+    tax_by_ticker = {e["ticker"]: e["code"] for e in raw_tax}
+    assert tax_by_ticker.get("EDX1") == "discoverer_id_not_found"
+
+
+# -------- _has_written_no_metrics_publications unit tests --------
+
+
+def test_has_written_no_metrics_true_when_all_written_zero_metrics() -> None:
+    state_slice: dict[str, dict[str, object]] = {
+        "EDX1482": {
+            "publications": [{"publication_id": "EDX1482-3-194054", "status": "written"}],
+            "metrics_count": 0,
+        }
+    }
+    assert _has_written_no_metrics_publications(state_slice, "EDX1482") is True
+
+
+def test_has_written_no_metrics_false_when_metrics_exist() -> None:
+    state_slice: dict[str, dict[str, object]] = {
+        "EDX1": {
+            "publications": [{"publication_id": "EDX1-3-1", "status": "written"}],
+            "metrics_count": 5,
+        }
+    }
+    assert _has_written_no_metrics_publications(state_slice, "EDX1") is False
+
+
+def test_has_written_no_metrics_false_when_not_all_written() -> None:
+    state_slice: dict[str, dict[str, object]] = {
+        "EDX1": {
+            "publications": [
+                {"publication_id": "EDX1-3-1", "status": "written"},
+                {"publication_id": "EDX1-3-2", "status": "extracted"},
+            ],
+            "metrics_count": 0,
+        }
+    }
+    assert _has_written_no_metrics_publications(state_slice, "EDX1") is False
+
+
+def test_has_written_no_metrics_false_when_empty_pubs() -> None:
+    state_slice: dict[str, dict[str, object]] = {
+        "EDX1": {"publications": [], "metrics_count": 0}
+    }
+    assert _has_written_no_metrics_publications(state_slice, "EDX1") is False
+
+
+def test_bundle_neutral_ticker_with_written_no_metrics_included_in_failing(
+    evolve_db: Database, evolve_conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    """A neutral-verdict ticker with all publications written but 0 metrics
+    must appear in failing_tickers so the taxonomy fires llm_arg_too_long."""
+    bundle_dir = tmp_path / "written_no_metrics"
+    log_path = tmp_path / "p.log"
+    e2big_err = (
+        "claude_code: cannot spawn '/usr/bin/claude': "
+        "[Errno 7] Argument list too long: '/usr/bin/claude'"
+    )
+    _write_log = lambda lines: log_path.write_text(  # noqa: E731
+        "\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8"
+    )
+    _write_log(
+        [
+            {
+                "event": "metric_extract_llm_unavailable",
+                "level": "error",
+                "publication_id": "EDX1-3-194054",
+                "error": e2big_err,
+            }
+        ]
+    )
+
+    # Seed a written publication with 0 metrics in the DB.
+    TickersRepo(evolve_db, evolve_conn).upsert_from_config(
+        [TickerEntry(ticker="EDX1", e_disclosure_id="1", name="Co1")]
+    )
+    repo = PublicationsRepo(evolve_db, evolve_conn)
+    repo.upsert_discovered(
+        publication_id="EDX1-3-194054",
+        ticker="EDX1",
+        publication_type="report",
+        publication_date="2012-08-15",
+        source_url="https://example.test/r.zip",
+    )
+    for status in ("downloaded", "unpacked", "classified", "extracted", "validated", "written"):
+        repo.mark_status("EDX1-3-194054", status)  # type: ignore[arg-type]
+
+    batch = _make_batch()
+    verdicts = {
+        "EDX1": _verdict("EDX1", "neutral"),
+        "EDX2": _verdict("EDX2", "ok"),
+        "EDX3": _verdict("EDX3", "ok"),
+    }
+
+    manifest = bundle_module.assemble(
+        bundle_dir,
+        batch=batch,
+        snaps_before={f"EDX{i}": _empty_snap(f"EDX{i}") for i in (1, 2, 3)},
+        snaps_after={f"EDX{i}": _empty_snap(f"EDX{i}") for i in (1, 2, 3)},
+        verdicts=verdicts,
+        log_path=log_path,
+        state_db=Path(evolve_db.path),
+        conn=evolve_conn,
+    )
+
+    assert "EDX1" in manifest["failing_tickers"]
+    assert "EDX2" not in manifest["failing_tickers"]
+
+    raw_tax = json.loads(
+        (bundle_dir / "failure_taxonomy.json").read_text(encoding="utf-8")
+    )
+    tax_by_ticker = {e["ticker"]: e["code"] for e in raw_tax}
+    assert tax_by_ticker.get("EDX1") == "llm_arg_too_long"
+
+
+# -------- _has_written_no_metrics: mixed written+skipped cases --------
+
+
+def test_has_written_no_metrics_true_when_mixed_written_and_skipped() -> None:
+    """Mixed written+skipped, 0 metrics → True (EDX20321 scenario)."""
+    state_slice: dict[str, dict[str, object]] = {
+        "EDX20321": {
+            "publications": [
+                {"publication_id": "EDX20321-3-1", "status": "written"},
+                {"publication_id": "EDX20321-3-2", "status": "written"},
+                {"publication_id": "EDX20321-2-3", "status": "skipped"},
+                {"publication_id": "EDX20321-2-4", "status": "skipped"},
+            ],
+            "metrics_count": 0,
+        }
+    }
+    assert _has_written_no_metrics_publications(state_slice, "EDX20321") is True
+
+
+def test_has_written_no_metrics_true_when_all_skipped_zero_metrics() -> None:
+    """All publications skipped, 0 metrics → True."""
+    state_slice: dict[str, dict[str, object]] = {
+        "EDX1": {
+            "publications": [
+                {"publication_id": "EDX1-2-1", "status": "skipped"},
+                {"publication_id": "EDX1-2-2", "status": "skipped"},
+            ],
+            "metrics_count": 0,
+        }
+    }
+    assert _has_written_no_metrics_publications(state_slice, "EDX1") is True
+
+
+def test_has_written_no_metrics_false_when_some_not_terminal() -> None:
+    """written + extracted (non-terminal) → False; not all publications are terminal."""
+    state_slice: dict[str, dict[str, object]] = {
+        "EDX1": {
+            "publications": [
+                {"publication_id": "EDX1-3-1", "status": "written"},
+                {"publication_id": "EDX1-3-2", "status": "extracted"},
+            ],
+            "metrics_count": 0,
+        }
+    }
+    assert _has_written_no_metrics_publications(state_slice, "EDX1") is False
+
+
+def test_bundle_neutral_ticker_with_mixed_terminal_included_in_failing(
+    evolve_db: Database, evolve_conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    """A neutral-verdict ticker with mixed written+skipped and 0 metrics must
+    appear in failing_tickers so the taxonomy fires all_terminal_no_metrics."""
+    bundle_dir = tmp_path / "mixed_terminal"
+    log_path = tmp_path / "p.log"
+    log_path.write_text("", encoding="utf-8")
+
+    TickersRepo(evolve_db, evolve_conn).upsert_from_config(
+        [TickerEntry(ticker="EDX1", e_disclosure_id="1", name="Co1")]
+    )
+    repo = PublicationsRepo(evolve_db, evolve_conn)
+
+    # Seed one written and one skipped publication with 0 metrics.
+    repo.upsert_discovered(
+        publication_id="EDX1-3-1",
+        ticker="EDX1",
+        publication_type="report",
+        publication_date="2012-08-15",
+        source_url="https://example.test/r1.zip",
+    )
+    for status in ("downloaded", "unpacked", "classified", "extracted", "validated", "written"):
+        repo.mark_status("EDX1-3-1", status)  # type: ignore[arg-type]
+
+    repo.upsert_discovered(
+        publication_id="EDX1-2-2",
+        ticker="EDX1",
+        publication_type="report",
+        publication_date="2012-08-15",
+        source_url="https://example.test/r2.zip",
+    )
+    for status in ("downloaded", "unpacked", "classified", "extracted", "validated", "skipped"):
+        repo.mark_status("EDX1-2-2", status)  # type: ignore[arg-type]
+
+    batch = _make_batch()
+    verdicts = {
+        "EDX1": _verdict("EDX1", "neutral"),
+        "EDX2": _verdict("EDX2", "ok"),
+        "EDX3": _verdict("EDX3", "ok"),
+    }
+
+    manifest = bundle_module.assemble(
+        bundle_dir,
+        batch=batch,
+        snaps_before={f"EDX{i}": _empty_snap(f"EDX{i}") for i in (1, 2, 3)},
+        snaps_after={f"EDX{i}": _empty_snap(f"EDX{i}") for i in (1, 2, 3)},
+        verdicts=verdicts,
+        log_path=log_path,
+        state_db=Path(evolve_db.path),
+        conn=evolve_conn,
+    )
+
+    assert "EDX1" in manifest["failing_tickers"]
+    assert "EDX2" not in manifest["failing_tickers"]
+
+    raw_tax = json.loads(
+        (bundle_dir / "failure_taxonomy.json").read_text(encoding="utf-8")
+    )
+    tax_by_ticker = {e["ticker"]: e["code"] for e in raw_tax}
+    assert tax_by_ticker.get("EDX1") == "all_terminal_no_metrics"

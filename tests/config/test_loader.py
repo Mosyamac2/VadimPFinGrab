@@ -22,7 +22,7 @@ def _copy_reference_configs(target: Path) -> None:
 def test_load_reference_configs(tmp_path: Path) -> None:
     settings = load_all(REPO_CONFIG_DIR, env_file=tmp_path / "missing.env")
     assert isinstance(settings, AppSettings)
-    assert settings.app.mode.backfill_years == 3
+    assert settings.app.mode.backfill_years == 1
     # Patch 19: metrics.yaml is split into per-issuer profiles.
     non_bank = settings.metrics.for_profile("non_bank")
     bank = settings.metrics.for_profile("bank")

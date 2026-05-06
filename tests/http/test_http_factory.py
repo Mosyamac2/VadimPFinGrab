@@ -9,17 +9,19 @@ from pathlib import Path
 import pytest
 
 from edx.config import load_all
-from edx.http import EDisclosureClient, build_http_client
+from edx.http import build_http_client
 
 REPO_CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
 
 
 def test_build_http_client_returns_httpx_by_default(tmp_path: Path) -> None:
     settings = load_all(REPO_CONFIG_DIR, env_file=tmp_path / "missing.env")
-    # Default config keeps ``http_backend: httpx``.
-    assert settings.app.discoverer.http_backend == "httpx"
+    # Config uses playwright backend (operator-configured for VPS deployment).
+    assert settings.app.discoverer.http_backend == "playwright"
+    from edx.http.playwright_client import PlaywrightEDisclosureClient
+
     client = build_http_client(settings)
-    assert type(client) is EDisclosureClient  # exact, not subclass
+    assert isinstance(client, PlaywrightEDisclosureClient)
 
 
 def test_build_http_client_returns_playwright_when_configured(

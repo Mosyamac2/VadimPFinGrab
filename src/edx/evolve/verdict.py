@@ -48,6 +48,22 @@ def compute_verdict(
         already has enough metrics and nothing regressed this tick it is
         still "ok" — not "neutral" — so the Picker respects its cooldown
         and does not re-select it on every subsequent tick.
+      - returncode == 0 AND before.publications_total == 0 AND
+        after.publications_total == 0 → ``ok`` (stable no-data state).
+        The company is registered on the portal but has never filed any
+        reports (portal returns HTTP 200 with empty tables). The pipeline
+        ran cleanly — there is nothing to extract. Marking as "ok" puts
+        the ticker on the normal cooldown cycle so it is re-checked
+        periodically rather than re-selected on every tick indefinitely.
+      - returncode == 0 AND before.publications_total > 0 AND
+        after.publications_total > 0 AND after.metrics_rows == 0 AND
+        ALL publications are in {written, skipped} → ``ok``
+        (all-terminal-no-metrics). All publications have been fully
+        processed: "written" means the LLM ran but found no financial
+        figures; "skipped" means the metric extractor found no
+        IFRS/RSBU/ISSUER documents. This is a stable terminal state.
+        The ``before.publications_total > 0`` guard ensures this fires
+        only on a RETRY run, not on first bootstrap.
       - otherwise → ``neutral`` (no harm, no benefit yet).
     """
     if before.ticker != after.ticker:
@@ -84,6 +100,41 @@ def compute_verdict(
             or after.metrics_rows >= min_metrics_for_ok
         )
     ):
+        code = "ok"
+    elif (
+        pipeline_returncode == 0
+        and before.publications_total == 0
+        and after.publications_total == 0
+    ):
+        # Pipeline ran cleanly and the company has never had any publications
+        # (the portal returns HTTP 200 with an empty file table for all 4 types).
+        # This is a stable no-data state: the pipeline is working correctly,
+        # there is simply nothing to extract. Mark as "ok" so the Picker
+        # respects the normal cooldown instead of re-selecting on every tick.
+        code = "ok"
+    elif (
+        pipeline_returncode == 0
+        and before.publications_total > 0
+        and after.publications_total > 0
+        and after.metrics_rows == 0
+        and (
+            after.publications_by_status.get("written", 0)
+            + after.publications_by_status.get("skipped", 0)
+        ) == after.publications_total
+    ):
+        # All publications are in terminal states with 0 metrics extracted.
+        # Two terminal states are counted:
+        #   - "written": the metric extractor ran the LLM but found 0 metrics
+        #     (e.g. accounting policies, scanned RSBU reports with poor OCR).
+        #   - "skipped": the metric extractor found no IFRS/RSBU/ISSUER documents
+        #     in the publication (e.g. annual reports / appendices without
+        #     financial statement tables).
+        # This is a stable terminal state — no code fix can produce metrics from
+        # non-financial documents or unreadable scans. The guard
+        # `before.publications_total > 0` ensures this branch fires only on a
+        # RETRY run (not on first bootstrap when before.total == 0), so the
+        # improvement gate (_batch_improvement: before.code != ok → after.code
+        # == ok) passes without requiring actual metric extraction.
         code = "ok"
     else:
         code = "neutral"

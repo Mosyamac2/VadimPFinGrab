@@ -191,10 +191,14 @@ class ClaudeCodeLLMProvider:
         Raises :class:`LLMUnavailableError` on subprocess timeout, claude
         exit error, or stream-json result with ``is_error=true``.
         """
+        # Pass the user prompt via stdin, not as a positional CLI arg.
+        # Linux MAX_ARG_STRLEN (128 KB) limits individual argv strings;
+        # large RSBU documents assembled from 100+ pages can exceed it,
+        # causing OSError [Errno 7]. `claude -p` reads from stdin when no
+        # positional [prompt] argument is given ("useful for pipes").
         argv: list[str] = [
             self.claude_executable,
             "-p",
-            user,
             "--output-format",
             "stream-json",
             "--verbose",
@@ -221,6 +225,7 @@ class ClaudeCodeLLMProvider:
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=child_env,
@@ -232,7 +237,8 @@ class ClaudeCodeLLMProvider:
 
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(), timeout=self.timeout_seconds
+                proc.communicate(input=user.encode("utf-8")),
+                timeout=self.timeout_seconds,
             )
         except TimeoutError as exc:
             try:
