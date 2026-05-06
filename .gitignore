@@ -69,3 +69,17 @@ data/state.sqlite.tick*.bak
 .env.evolve
 .env.proxy
 config-evolve/
+
+# Operator-local files that must not pollute the evolve gate's
+# whitelist check (these are user state, not loop output, but they
+# live in the working tree). Untracked entries here vanish from
+# `git ls-files --others --exclude-standard`, which is what
+# git_ops.changed_files reads.
+DEBUG_EVOLVE_PROMPT.md
+IMPLEMENT_*.md
+state.sqlite
+state.sqlite-*
+config/logs/
+config/tickers_longlist.yaml
+config/tickers_shortlist.yaml
+data/canary_baseline.json

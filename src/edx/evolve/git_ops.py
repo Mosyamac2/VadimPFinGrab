@@ -129,21 +129,52 @@ def changed_files(cwd: Path, base: str = "master") -> list[str]:
     return sorted(files)
 
 
+def operator_dirty_files(cwd: Path, base: str = "master") -> frozenset[str]:
+    """Snapshot operator-local working-tree mess vs ``base`` for gate-ignore.
+
+    Captured BEFORE the agent runs so we can later distinguish "files the
+    agent introduced" from "files the operator was already mid-editing on
+    master". The latter must not count as whitelist violations or be
+    accidentally staged into a tick commit.
+    """
+    return frozenset(changed_files(cwd, base=base))
+
+
 def whitelist_violations(
-    cwd: Path, base: str = "master"
+    cwd: Path,
+    base: str = "master",
+    *,
+    ignore: frozenset[str] = frozenset(),
 ) -> list[str]:
-    """Return paths the patch wants to add/modify but isn't allowed to."""
+    """Return paths the patch wants to add/modify but isn't allowed to.
+
+    Paths in ``ignore`` are excluded — they were already dirty before the
+    tick started (operator-local edits) and are not the agent's doing.
+    """
     violations: list[str] = []
     for path in changed_files(cwd, base=base):
+        if path in ignore:
+            continue
         if _is_prohibited(path) or not _is_allowed(path):
             violations.append(path)
     return violations
 
 
-def stage_changes(cwd: Path, base: str = "master") -> list[str]:
-    """``git add`` only the whitelisted paths. Returns what was staged."""
+def stage_changes(
+    cwd: Path,
+    base: str = "master",
+    *,
+    ignore: frozenset[str] = frozenset(),
+) -> list[str]:
+    """``git add`` only the whitelisted paths. Returns what was staged.
+
+    Paths in ``ignore`` are skipped so operator-local working-tree mess
+    never gets bundled into the agent's commit.
+    """
     staged: list[str] = []
     for path in changed_files(cwd, base=base):
+        if path in ignore:
+            continue
         if _is_prohibited(path) or not _is_allowed(path):
             continue
         _git_text(cwd, ["add", "--", path])
@@ -159,6 +190,7 @@ def commit_and_merge(
     push: bool = True,
     remote: str = "origin",
     target_branch: str = "master",
+    ignore: frozenset[str] = frozenset(),
 ) -> GitMergeResult:
     """Commit on ``evolve/tick-N``, fast-forward into ``target_branch``, push.
 
@@ -216,7 +248,7 @@ def commit_and_merge(
             notes=(f"target_not_protected:{target_branch}",),
         )
 
-    violations = whitelist_violations(cwd, base=target_branch)
+    violations = whitelist_violations(cwd, base=target_branch, ignore=ignore)
     if violations:
         return GitMergeResult(
             branch=branch,
@@ -226,7 +258,7 @@ def commit_and_merge(
             notes=("whitelist_violations:" + ",".join(violations[:5]),),
         )
 
-    staged = stage_changes(cwd, base=target_branch)
+    staged = stage_changes(cwd, base=target_branch, ignore=ignore)
     if not staged:
         return GitMergeResult(
             branch=branch,
@@ -379,6 +411,7 @@ __all__ = [
     "GitMergeResult",
     "abandon_branch",
     "changed_files",
+    "operator_dirty_files",
     "commit_and_merge",
     "create_tick_branch",
     "current_branch",

@@ -334,6 +334,22 @@ def run_one_tick(
             else ""
         )
 
+        # Snapshot operator-local working-tree mess BEFORE the agent runs
+        # so the gate can later distinguish "files the agent introduced"
+        # from "files the operator was already mid-editing on master". The
+        # latter must not count as whitelist violations or be staged into
+        # this tick's commit. (Without this, every tick failed at
+        # `whitelist_violations` because the operator typically keeps
+        # local-only edits in config/, deploy/, etc.)
+        pre_tick_dirty = git_ops_module.operator_dirty_files(Path("."))
+
+        # Snapshot pytest failures BEFORE the agent runs. The
+        # regression-tests gate later only counts tests the agent broke
+        # (post − pre); pre-existing failures from operator-local mess
+        # don't get blamed on the agent. Without this, a single broken
+        # test on master rolled back every tick.
+        pre_tick_failing_tests = _pytest_failing_tests(Path("."))
+
         # Patch 43: agent runs on a dedicated branch evolve/tick-N so
         # any partial edit can be discarded without touching master.
         try:
@@ -395,8 +411,14 @@ def run_one_tick(
             )
             return tick_id
 
-        # tests gate
-        if not _run_make_target(Path("."), "test"):
+        # tests gate — delta semantics: only NEW failures (tests that
+        # passed pre-tick but fail post-tick) count as regression. Tests
+        # that were already broken on master baseline don't roll the tick
+        # back. This is what makes the gate honest: the agent is only
+        # responsible for what it actually broke.
+        post_tick_failing_tests = _pytest_failing_tests(Path("."))
+        new_failures = post_tick_failing_tests - pre_tick_failing_tests
+        if new_failures:
             git_ops_module.abandon_branch(Path("."), tick_id)
             repo.update_tick(
                 tick_id,
@@ -405,7 +427,10 @@ def run_one_tick(
                 claude_session=claude_res.session_id,
                 claude_cost_usd=claude_res.cost_usd,
                 claude_turns=claude_res.turns,
-                error_summary="make_test_red",
+                error_summary=(
+                    "agent_broke_tests:"
+                    + ",".join(sorted(new_failures)[:5])
+                ),
                 finished_at=_utc_now_iso(),
                 **common_update_kwargs,
             )
@@ -414,6 +439,8 @@ def run_one_tick(
                 "evolve_tick_finished",
                 tick_id=tick_id,
                 verdict="regression_tests",
+                new_failures_count=len(new_failures),
+                pre_existing_failures_count=len(pre_tick_failing_tests),
             )
             return tick_id
 
@@ -500,7 +527,11 @@ def run_one_tick(
             claude_res=claude_res,
         )
         merge_res = git_ops_module.commit_and_merge(
-            Path("."), tick_id, commit_message, push=True
+            Path("."),
+            tick_id,
+            commit_message,
+            push=True,
+            ignore=pre_tick_dirty,
         )
         if not merge_res.pushed or merge_res.commit_sha is None:
             git_ops_module.abandon_branch(Path("."), tick_id)
@@ -580,6 +611,42 @@ def _run_make_target(cwd: Path, target: str) -> bool:
         ["make", target], cwd=str(cwd), capture_output=True, text=True
     )
     return proc.returncode == 0
+
+
+def _pytest_failing_tests(cwd: Path) -> frozenset[str]:
+    """Run pytest and return the set of failing test node IDs.
+
+    Used by the regression-tests delta gate: only NEWLY-failing tests
+    (i.e., post-tick failures minus pre-tick failures) count against the
+    agent. If the operator's working tree starts with broken tests, the
+    agent isn't blamed for that — only for breaking previously-passing
+    ones. Returns an empty frozenset if pytest exits 0 (all green).
+    """
+    import subprocess
+
+    proc = subprocess.run(
+        [
+            "/opt/edx/.venv/bin/python",
+            "-m",
+            "pytest",
+            "--tb=no",
+            "-q",
+            "-rN",
+            "-rf",
+        ],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+    )
+    failing: set[str] = set()
+    for line in proc.stdout.splitlines():
+        if line.startswith("FAILED "):
+            # "FAILED tests/foo/test_bar.py::test_baz - AssertionError: ..."
+            rest = line[len("FAILED "):]
+            test_id = rest.split(" - ", 1)[0].strip()
+            if test_id:
+                failing.add(test_id)
+    return frozenset(failing)
 
 
 def _batch_improvement(

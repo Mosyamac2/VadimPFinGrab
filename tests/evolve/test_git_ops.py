@@ -93,6 +93,79 @@ def test_whitelist_allows_src_and_memory(tmp_path: Path) -> None:
     assert git_ops.whitelist_violations(repo) == []
 
 
+def test_operator_dirty_files_snapshots_pre_tick_state(tmp_path: Path) -> None:
+    """Operator-local working-tree mess captured before the agent runs."""
+    repo = _make_repo(tmp_path / "r")
+    # Operator has uncommitted edits before the tick starts.
+    (repo / "deploy" / "secret.sh").write_text(
+        "# operator changed this\n", encoding="utf-8"
+    )
+    (repo / "src" / "edx" / "core.py").write_text(
+        "def hello(): return 'operator local'\n", encoding="utf-8"
+    )
+    snapshot = git_ops.operator_dirty_files(repo)
+    assert "deploy/secret.sh" in snapshot
+    assert "src/edx/core.py" in snapshot
+
+
+def test_whitelist_violations_ignores_operator_dirty(tmp_path: Path) -> None:
+    """Files dirty before the tick started must not count as violations."""
+    repo = _make_repo(tmp_path / "r")
+    # Operator's pre-tick mess: a prohibited path is already modified.
+    (repo / "deploy" / "secret.sh").write_text(
+        "# operator local\n", encoding="utf-8"
+    )
+    pre_tick = git_ops.operator_dirty_files(repo)
+    git_ops.create_tick_branch(repo, 1)
+    # Agent's clean patch on top.
+    (repo / "src" / "edx" / "ok.py").write_text("ok\n", encoding="utf-8")
+    # Without ignore: the operator's deploy/ edit trips the gate.
+    assert "deploy/secret.sh" in git_ops.whitelist_violations(repo)
+    # With ignore: the agent's patch is the only thing in scope, no violations.
+    assert git_ops.whitelist_violations(repo, ignore=pre_tick) == []
+
+
+def test_stage_changes_skips_operator_dirty(tmp_path: Path) -> None:
+    """``stage_changes`` must NOT bundle operator-local edits into the tick
+    commit, even when those paths happen to be in the allowlist."""
+    repo = _make_repo(tmp_path / "r")
+    # Operator was mid-editing an allowlisted file before the tick.
+    (repo / "src" / "edx" / "core.py").write_text(
+        "def hello(): return 'OPERATOR'\n", encoding="utf-8"
+    )
+    pre_tick = git_ops.operator_dirty_files(repo)
+    git_ops.create_tick_branch(repo, 1)
+    # Agent adds an unrelated file.
+    (repo / "src" / "edx" / "agent.py").write_text("AGENT\n", encoding="utf-8")
+    staged = git_ops.stage_changes(repo, ignore=pre_tick)
+    assert "src/edx/agent.py" in staged
+    assert "src/edx/core.py" not in staged
+
+
+def test_commit_and_merge_ignores_operator_dirty(tmp_path: Path) -> None:
+    """End-to-end: operator's pre-tick deploy/ edit no longer aborts the gate.
+    Anti-regression for the 184-tick streak with zero successful agent commits."""
+    repo = _make_repo(tmp_path / "r")
+    _make_origin(repo, tmp_path / "o.git")
+    # Operator's pre-tick mess in a prohibited path.
+    (repo / "deploy" / "secret.sh").write_text(
+        "# operator local edit\n", encoding="utf-8"
+    )
+    pre_tick = git_ops.operator_dirty_files(repo)
+    git_ops.create_tick_branch(repo, 99)
+    # Agent's clean patch.
+    (repo / "src" / "edx" / "agent.py").write_text(
+        "def fix(): return 'patched'\n", encoding="utf-8"
+    )
+    res = git_ops.commit_and_merge(
+        repo, 99, "evolve(99): patch", push=True, ignore=pre_tick
+    )
+    assert res.commit_sha, f"expected success, got {res.notes}"
+    assert res.pushed is True
+    # Operator's working-tree edit is preserved (not committed, not lost).
+    assert (repo / "deploy" / "secret.sh").read_text() == "# operator local edit\n"
+
+
 def test_stage_changes_skips_violations(tmp_path: Path) -> None:
     repo = _make_repo(tmp_path / "r")
     git_ops.create_tick_branch(repo, 1)
